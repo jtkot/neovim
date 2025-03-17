@@ -910,7 +910,7 @@ void set_hl_group(int id, HlAttrs attrs, Dict(highlight) *dict, int link_id)
   HlGroup *g = &hl_table[idx];
   g->sg_cleared = false;
 
-  if (link_id > 0) {
+  if (link_id >= 0) {
     g->sg_link = link_id;
     g->sg_script_ctx = current_sctx;
     g->sg_script_ctx.sc_lnum += SOURCING_LNUM;
