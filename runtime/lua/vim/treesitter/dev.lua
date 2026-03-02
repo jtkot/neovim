@@ -45,7 +45,7 @@ local TSTreeView = {}
 ---@param depth integer Current recursion depth
 ---@param field string|nil The field of the current node
 ---@param lang string Language of the tree currently being traversed
----@param injections table<string, vim.treesitter.dev.Injection> Mapping of node ids to root nodes
+---@param injections table<string, vim.treesitter.dev.Injection[]> Mapping of node ids to root nodes
 ---                  of injected language trees (see explanation above)
 ---@param tree vim.treesitter.dev.Node[] Output table containing a list of tables each representing a node in the tree
 local function traverse(node, depth, field, lang, injections, tree)
@@ -56,8 +56,7 @@ local function traverse(node, depth, field, lang, injections, tree)
     field = field,
   })
 
-  local injection = injections[node:id()]
-  if injection then
+  for _, injection in ipairs(injections[node:id()] or {}) do
     traverse(injection.root, depth + 1, nil, injection.lang, injections, tree)
   end
 
@@ -94,7 +93,7 @@ function TSTreeView:new(bufnr, lang)
   -- the primary tree that contains that root. Add a mapping from the node in the primary tree to
   -- the root in the child tree to the {injections} table.
   local root = parser:parse(true)[1]:root()
-  local injections = {} ---@type table<string, vim.treesitter.dev.Injection>
+  local injections = {} ---@type table<string, table<string, TSNode>>
 
   parser:for_each_tree(function(parent_tree, parent_ltree)
     local parent = parent_tree:root()
@@ -106,18 +105,32 @@ function TSTreeView:new(bufnr, lang)
         if Range.contains(parent_range, r_range) then
           local node = assert(parent:named_descendant_for_range(r:range()))
           local id = node:id()
-          if not injections[id] or r:byte_length() > injections[id].root:byte_length() then
-            injections[id] = {
-              lang = child:lang(),
-              root = r,
-            }
+          local ilang = child:lang()
+          injections[id] = injections[id] or {}
+          local injection = injections[id][ilang]
+          if not injection or r:byte_length() > injection:byte_length() then
+            injections[id][ilang] = r
           end
         end
       end
     end
   end)
 
-  local nodes = traverse(root, 0, nil, parser:lang(), injections, {})
+  local sorted_injections = {} ---@type table<string, vim.treesitter.dev.Injection[]>
+  for id, lang_injections in pairs(injections) do
+    local langs = vim.tbl_keys(lang_injections)
+    ---@param a string
+    ---@param b string
+    table.sort(langs, function(a, b)
+      return lang_injections[a]:byte_length() > lang_injections[b]:byte_length()
+    end)
+    ---@param ilang string
+    sorted_injections[id] = vim.tbl_map(function(ilang)
+      return { lang = ilang, root = lang_injections[ilang] }
+    end, langs)
+  end
+
+  local nodes = traverse(root, 0, nil, parser:lang(), sorted_injections, {})
 
   local named = {} ---@type vim.treesitter.dev.Node[]
   for _, v in ipairs(nodes) do
@@ -378,7 +391,7 @@ function M.inspect_tree(opts)
   local opts_title = opts.title
   if not opts_title then
     local bufname = api.nvim_buf_get_name(buf)
-    title = string.format('Syntax tree for %s', vim.fn.fnamemodify(bufname, ':.'))
+    title = ('Syntax tree for %s'):format(vim.fs.relpath('.', bufname) or bufname)
   elseif type(opts_title) == 'function' then
     title = opts_title(buf)
   end
@@ -394,6 +407,7 @@ function M.inspect_tree(opts)
   api.nvim_buf_clear_namespace(buf, treeview.ns, 0, -1)
   api.nvim_buf_set_keymap(b, 'n', '<CR>', '', {
     desc = 'Jump to the node under the cursor in the source buffer',
+    nowait = true,
     callback = function()
       local row = api.nvim_win_get_cursor(w)[1]
       local lnum, col = treeview:get(row).node:start()
@@ -409,6 +423,7 @@ function M.inspect_tree(opts)
   })
   api.nvim_buf_set_keymap(b, 'n', 'a', '', {
     desc = 'Toggle anonymous nodes',
+    nowait = true,
     callback = function()
       local row, col = unpack(api.nvim_win_get_cursor(w)) ---@type integer, integer
       local curnode = treeview:get(row)
@@ -435,6 +450,7 @@ function M.inspect_tree(opts)
   })
   api.nvim_buf_set_keymap(b, 'n', 'I', '', {
     desc = 'Toggle language display',
+    nowait = true,
     callback = function()
       treeview.opts.lang = not treeview.opts.lang
       treeview:draw(b)
@@ -442,6 +458,7 @@ function M.inspect_tree(opts)
   })
   api.nvim_buf_set_keymap(b, 'n', 'o', '', {
     desc = 'Toggle query editor',
+    nowait = true,
     callback = function()
       local edit_w = vim.b[buf].dev_edit
       if not edit_w or not close_win(edit_w) then
@@ -449,8 +466,10 @@ function M.inspect_tree(opts)
       end
     end,
   })
-
-  api.nvim_buf_set_keymap(b, 'n', 'q', '<Cmd>wincmd c<CR>', { desc = 'Close language tree window' })
+  api.nvim_buf_set_keymap(b, 'n', 'q', '<Cmd>wincmd c<CR>', {
+    desc = 'Close language tree window',
+    nowait = true,
+  })
 
   local group = api.nvim_create_augroup('nvim.treesitter.dev', {})
 
@@ -591,16 +610,18 @@ local function update_editor_highlights(query_win, base_win, lang)
     end
     local root = tree:root()
     local topline, botline = vim.fn.line('w0', base_win), vim.fn.line('w$', base_win)
-    for id, node in query:iter_captures(root, base_buf, topline - 1, botline) do
+    for id, node, metadata in query:iter_captures(root, base_buf, topline - 1, botline) do
       local capture_name = query.captures[id]
       if capture_name == cursor_word then
-        local lnum, col, end_lnum, end_col = node:range()
+        local lnum, col, end_lnum, end_col =
+          Range.unpack4(vim.treesitter.get_range(node, base_buf, metadata[id]))
+
         api.nvim_buf_set_extmark(base_buf, edit_ns, lnum, col, {
           end_row = end_lnum,
           end_col = end_col,
           hl_group = 'Visual',
           virt_text = {
-            { capture_name, 'Title' },
+            { capture_name, 'DiagnosticVirtualTextHint' },
           },
         })
       end

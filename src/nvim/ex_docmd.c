@@ -964,6 +964,7 @@ void handle_did_throw(void)
   assert(current_exception != NULL);
   char *p = NULL;
   msglist_T *messages = NULL;
+  ESTACK_CHECK_DECLARATION;
 
   // If the uncaught exception is a user exception, report it as an
   // error.  If it is an error exception, display the saved error
@@ -985,6 +986,7 @@ void handle_did_throw(void)
   }
 
   estack_push(ETYPE_EXCEPT, current_exception->throw_name, current_exception->throw_lnum);
+  ESTACK_CHECK_SETUP;
   current_exception->throw_name = NULL;
 
   discard_current_exception();              // uses IObuff if 'verbose'
@@ -1009,6 +1011,7 @@ void handle_did_throw(void)
     xfree(p);
   }
   xfree(SOURCING_NAME);
+  ESTACK_CHECK_NOW;
   estack_pop();
 }
 
@@ -1488,9 +1491,6 @@ static char *find_excmd_after_range(exarg_T *eap)
   // Save location after command modifiers.
   char *cmd = eap->cmd;
   eap->cmd = skip_range(eap->cmd, NULL);
-  if (*eap->cmd == '*') {
-    eap->cmd = skipwhite(eap->cmd + 1);
-  }
   char *p = find_ex_command(eap, NULL);
   eap->cmd = cmd;  // Restore original position for address parsing
   return p;
@@ -2341,12 +2341,7 @@ static char *do_one_cmd(char **cmdlinep, int flags, cstack_T *cstack, LineGetter
     // Also do this for ":read !cmd", ":write !cmd" and ":global".
     // Any others?
     for (char *s = ea.arg; *s; s++) {
-      // Remove one backslash before a newline, so that it's possible to
-      // pass a newline to the shell and also a newline that is preceded
-      // with a backslash.  This makes it impossible to end a shell
-      // command in a backslash, but that doesn't appear useful.
-      // Halving the number of backslashes is incompatible with previous
-      // versions.
+      // Remove one backslash before a newline.
       if (*s == '\\' && s[1] == '\n') {
         STRMOVE(s, s + 1);
       } else if (*s == '\n') {
@@ -2511,7 +2506,21 @@ static char *ex_range_without_command(exarg_T *eap)
 /// @return  FAIL when the command is not to be executed.
 int parse_command_modifiers(exarg_T *eap, const char **errormsg, cmdmod_T *cmod, bool skip_only)
 {
+  char *orig_cmd = eap->cmd;
+  char *cmd_start = NULL;
+  bool use_plus_cmd = false;
+  bool has_visual_range = false;
   CLEAR_POINTER(cmod);
+
+  if (strncmp(eap->cmd, "'<,'>", 5) == 0) {
+    // The automatically inserted Visual area range is skipped, so that
+    // typing ":cmdmod cmd" in Visual mode works without having to move the
+    // range to after the modifiers. The command will be "'<,'>cmdmod cmd",
+    // parse "cmdmod cmd" and then put back "'<,'>" before "cmd" below.
+    eap->cmd += 5;
+    cmd_start = eap->cmd;
+    has_visual_range = true;
+  }
 
   // Repeat until no more command modifiers are found.
   while (true) {
@@ -2521,14 +2530,16 @@ int parse_command_modifiers(exarg_T *eap, const char **errormsg, cmdmod_T *cmod,
       eap->cmd++;
     }
 
-    // in ex mode, an empty line works like :+
+    // in ex mode, an empty command (after modifiers) works like :+
     if (*eap->cmd == NUL && exmode_active
         && getline_equal(eap->ea_getline, eap->cookie, getexline)
         && curwin->w_cursor.lnum < curbuf->b_ml.ml_line_count) {
       eap->cmd = exmode_plus;
+      use_plus_cmd = true;
       if (!skip_only) {
         ex_pressedreturn = true;
       }
+      break;  // no modifiers following
     }
 
     // ignore comment and empty lines
@@ -2748,6 +2759,39 @@ int parse_command_modifiers(exarg_T *eap, const char **errormsg, cmdmod_T *cmod,
       continue;
     }
     break;
+  }
+
+  if (has_visual_range) {
+    if (eap->cmd > cmd_start) {
+      // Move the '<,'> range to after the modifiers and insert a colon.
+      // Since the modifiers have been parsed put the colon on top of the
+      // space: "'<,'>mod cmd" -> "mod:'<,'>cmd
+      // Put eap->cmd after the colon.
+      if (use_plus_cmd) {
+        size_t len = strlen(cmd_start);
+
+        // Special case: empty command uses "+":
+        //  "'<,'>mods" -> "mods *+
+        //  Use "*" instead of "'<,'>" to avoid the command getting
+        //  longer, in case is was allocated.
+        memmove(orig_cmd, cmd_start, len);
+        xmemcpyz(orig_cmd + len, S_LEN(" *+"));
+      } else {
+        memmove(cmd_start - 5, cmd_start, (size_t)(eap->cmd - cmd_start));
+        eap->cmd -= 5;
+        memmove(eap->cmd - 1, ":'<,'>", 6);
+      }
+    } else {
+      // No modifiers, move the pointer back.
+      // Special case: change empty command to "+".
+      if (use_plus_cmd) {
+        eap->cmd = "'<,'>+";
+      } else {
+        eap->cmd = orig_cmd;
+      }
+    }
+  } else if (use_plus_cmd) {
+    eap->cmd = exmode_plus;
   }
 
   return OK;
@@ -3372,6 +3416,11 @@ char *skip_range(const char *cmd, int *ctx)
 
   // Skip ":" and white space.
   cmd = skip_colon_white(cmd, false);
+
+  // Skip "*" used for Visual range.
+  if (*cmd == '*') {
+    cmd = skipwhite(cmd + 1);
+  }
 
   return (char *)cmd;
 }
@@ -4676,8 +4725,8 @@ static int check_more(bool message, bool forceit)
         }
         return FAIL;
       }
-      semsg(NGETTEXT("E173: %" PRId64 " more file to edit",
-                     "E173: %" PRId64 " more files to edit", n), (int64_t)n);
+      semsg(NGETTEXT("E173: %d more file to edit",
+                     "E173: %d more files to edit", n), n);
       quitmore = 2;                 // next try to quit is allowed
     }
     return FAIL;
@@ -4704,6 +4753,7 @@ static void ex_colorscheme(exarg_T *eap)
     emsg_off--;
     xfree(expr);
 
+    msg_ext_set_kind("list_cmd");
     if (p != NULL) {
       msg(p, 0);
       xfree(p);
@@ -4725,9 +4775,9 @@ static void ex_highlight(exarg_T *eap)
 
 /// Call this function if we thought we were going to exit, but we won't
 /// (because of an error).  May need to restore the terminal mode.
-void not_exiting(void)
+void not_exiting(bool save_exiting)
 {
-  exiting = false;
+  exiting = save_exiting;
 }
 
 /// Call this function if we thought we were going to restart, but we won't
@@ -4804,6 +4854,7 @@ static void ex_quit(exarg_T *eap)
     return;
   }
 
+  bool save_exiting = exiting;
   // If there is only one relevant window we will exit.
   if (check_more(false, eap->forceit) == OK && only_one_window()) {
     exiting = true;
@@ -4814,7 +4865,7 @@ static void ex_quit(exarg_T *eap)
                         | CCGD_EXCMD))
       || check_more(true, eap->forceit) == FAIL
       || (only_one_window() && check_changed_any(eap->forceit, true))) {
-    not_exiting();
+    not_exiting(save_exiting);
   } else {
     // quit last window
     // Note: only_one_window() returns true, even so a help window is
@@ -4825,7 +4876,7 @@ static void ex_quit(exarg_T *eap)
     if (only_one_window() && (ONE_WINDOW || eap->addr_count == 0)) {
       getout(0);
     }
-    not_exiting();
+    not_exiting(save_exiting);
     // close window; may free buffer
     win_close(wp, !buf_hide(wp->w_buffer) || eap->forceit, eap->forceit);
   }
@@ -4871,12 +4922,12 @@ static void ex_quitall(exarg_T *eap)
   if (before_quit_all(eap) == FAIL) {
     return;
   }
+  bool save_exiting = exiting;
   exiting = true;
-  if (!eap->forceit && check_changed_any(false, false)) {
-    not_exiting();
-    return;
+  if (eap->forceit || !check_changed_any(false, false)) {
+    getout(0);
   }
-  getout(0);
+  not_exiting(save_exiting);
 }
 
 /// ":restart": restart the Nvim server (using ":qall!").
@@ -4884,45 +4935,66 @@ static void ex_quitall(exarg_T *eap)
 /// ":restart +cmd <command>": restart the Nvim server using ":cmd" and add -c <command> to the new server.
 static void ex_restart(exarg_T *eap)
 {
-  // Patch v:argv to include "-c <arg>" when it restarts.
-  if (eap->arg != NULL) {
-    const list_T *l = get_vim_var_list(VV_ARGV);
-    int argc = tv_list_len(l);
-    list_T *argv_cpy = tv_list_alloc(argc + 2);
-    bool added_startup_arg = false;
-    TV_LIST_ITER_CONST(l, li, {
-      const char *arg = tv_get_string(TV_LIST_ITEM_TV(li));
-      size_t arg_size = strlen(arg);
-      assert(arg_size <= (size_t)SSIZE_MAX);
-      tv_list_append_string(argv_cpy, arg, (ssize_t)arg_size);
-      if (!added_startup_arg) {
-        tv_list_append_string(argv_cpy, "-c", 2);
-        size_t cmd_size = strlen(eap->arg);
-        assert(cmd_size <= (size_t)SSIZE_MAX);
-        tv_list_append_string(argv_cpy, eap->arg, (ssize_t)cmd_size);
-        added_startup_arg = true;
+  const list_T *l = get_vim_var_list(VV_ARGV);
+  int argc = tv_list_len(l);
+  list_T *argv_cpy = tv_list_alloc(eap->arg ? argc + 2 : argc);
+
+  // Copy v:argv, skipping unwanted items.
+  for (listitem_T *li = l != NULL ? l->lv_first : NULL; li != NULL; li = li->li_next) {
+    const char *arg = tv_get_string(TV_LIST_ITEM_TV(li));
+    size_t arg_size = strlen(arg);
+    assert(arg_size <= (size_t)SSIZE_MAX);
+
+    if (strequal(arg, "--embed") || strequal(arg, "--headless")) {
+      continue;  // Drop --embed/--headless: the client decides how to start+attach the server.
+    } else if (strequal(arg, "-")) {
+      continue;  // Drop stdin ("-") argument.
+    } else if (strequal(arg, "-s")) {
+      // Drop "-s <scriptfile>": skip the scriptfile arg too.
+      if (li->li_next != NULL) {
+        li = li->li_next;
       }
-    });
-    set_vim_var_list(VV_ARGV, argv_cpy);
-  }
+      continue;
+    } else if (strequal(arg, "+:::")) {
+      // The special placeholder "+:::" marks a previous :restart command.
+      // Drop the `"+:::", "-c", "…"` triplet, to avoid "stacking" commands from previous :restart(s).
+      listitem_T *next1 = li->li_next;
+      if (next1 != NULL && strequal(tv_get_string(TV_LIST_ITEM_TV(next1)), "-c")) {
+        listitem_T *next2 = next1->li_next;
+        if (next2 != NULL) {
+          li = next2;
+          continue;
+        }
+      }
+      continue;  // If the triplet is incomplete, just skip "+:::"
+    } else if (strequal(arg, "--")) {
+      break;  // Drop "-- [files…]". Usually isn't wanted. User can :mksession instead.
+    }
 
-  bool confirm = (p_confirm || (cmdmod.cmod_flags & CMOD_CONFIRM));
-  if (confirm && check_changed_any(false, false)) {
-    return;
+    tv_list_append_string(argv_cpy, arg, (ssize_t)arg_size);
   }
+  // Append `"+:::", "-c", "<command>"` to end of v:argv.
+  // The "+:::" item is a no-op placeholder to mark the :restart "<command>".
+  if (eap->arg && eap->arg[0] != '\0') {
+    tv_list_append_string(argv_cpy, S_LEN("+:::"));
+    tv_list_append_string(argv_cpy, S_LEN("-c"));
+    tv_list_append_string(argv_cpy, eap->arg, (ssize_t)strlen(eap->arg));
+  }
+  set_vim_var_list(VV_ARGV, argv_cpy);
 
-  char *quit_cmd;
-  if (eap->do_ecmd_cmd) {
-    quit_cmd = eap->do_ecmd_cmd;
-  } else if (confirm) {
-    quit_cmd = "qall";
-  } else {
-    quit_cmd = "qall!";
+  char *quit_cmd = (eap->do_ecmd_cmd) ? eap->do_ecmd_cmd : "qall";
+  char *quit_cmd_copy = NULL;
+
+  // Prepend "confirm " to cmd if :confirm is used
+  if (cmdmod.cmod_flags & CMOD_CONFIRM) {
+    quit_cmd_copy = concat_str("confirm ", quit_cmd);
+    quit_cmd = quit_cmd_copy;
   }
 
   Error err = ERROR_INIT;
   restarting = true;
   nvim_command(cstr_as_string(quit_cmd), &err);
+  xfree(quit_cmd_copy);
   if (ERROR_SET(&err)) {
     emsg(err.msg);  // Could not exit
     api_clear_error(&err);
@@ -4983,6 +5055,9 @@ void ex_win_close(int forceit, win_T *win, tabpage_T *tp)
     emsg(_(e_autocmd_close));
     return;
   }
+  if (!win->w_floating && window_layout_locked(CMD_close)) {
+    return;
+  }
 
   buf_T *buf = win->w_buffer;
 
@@ -5024,6 +5099,10 @@ static void ex_tabclose(exarg_T *eap)
     return;
   }
 
+  if (window_layout_locked(CMD_tabclose)) {
+    return;
+  }
+
   int tab_number = get_tabpage_arg(eap);
   if (eap->errmsg != NULL) {
     return;
@@ -5052,6 +5131,10 @@ static void ex_tabonly(exarg_T *eap)
 
   if (first_tabpage->tp_next == NULL) {
     msg(_("Already only one tab page"), 0);
+    return;
+  }
+
+  if (window_layout_locked(CMD_tabonly)) {
     return;
   }
 
@@ -5085,6 +5168,14 @@ static void ex_tabonly(exarg_T *eap)
 /// Close the current tab page.
 void tabpage_close(int forceit)
 {
+  if (window_layout_locked(CMD_tabclose)) {
+    return;
+  }
+
+  trigger_tabclosedpre(curtab);
+  curtab->tp_did_tabclosedpre = true;
+  tabpage_T *const save_curtab = curtab;
+
   // First close all the windows but the current one.  If that worked then
   // close the last window in this tab, that will close it.
   while (curwin->w_floating) {
@@ -5095,6 +5186,11 @@ void tabpage_close(int forceit)
   }
   if (ONE_WINDOW) {
     ex_win_close(forceit, curwin, NULL);
+  }
+  if (curtab == save_curtab) {
+    // When closing the tab page failed, reset tp_did_tabclosedpre so that
+    // TabClosedPre behaves consistently on next :close vs :tabclose.
+    curtab->tp_did_tabclosedpre = false;
   }
 }
 
@@ -5107,6 +5203,13 @@ void tabpage_close_other(tabpage_T *tp, int forceit)
   int done = 0;
   char prev_idx[NUMBUFLEN];
 
+  if (window_layout_locked(CMD_SIZE)) {
+    return;
+  }
+
+  trigger_tabclosedpre(tp);
+  tp->tp_did_tabclosedpre = true;
+
   // Limit to 1000 windows, autocommands may add a window while we close
   // one.  OK, so I'm paranoid...
   while (++done < 1000) {
@@ -5114,20 +5217,33 @@ void tabpage_close_other(tabpage_T *tp, int forceit)
     win_T *wp = tp->tp_lastwin;
     ex_win_close(forceit, wp, tp);
 
-    // Autocommands may delete the tab page under our fingers and we may
-    // fail to close a window with a modified buffer.
-    if (!valid_tabpage(tp) || tp->tp_lastwin == wp) {
+    // Autocommands may delete the tab page under our fingers.
+    if (!valid_tabpage(tp)) {
       break;
     }
+    // We may fail to close a window with a modified buffer.
+    if (tp->tp_lastwin == wp) {
+      done = 1000;
+      break;
+    }
+  }
+  if (done >= 1000) {
+    // When closing the tab page failed, reset tp_did_tabclosedpre so that
+    // TabClosedPre behaves consistently on next :close vs :tabclose.
+    tp->tp_did_tabclosedpre = false;
+    return;
   }
 }
 
 /// ":only".
 static void ex_only(exarg_T *eap)
 {
-  win_T *wp;
+  if (window_layout_locked(CMD_only)) {
+    return;
+  }
 
   if (eap->addr_count > 0) {
+    win_T *wp;
     linenr_T wnr = eap->line2;
     for (wp = firstwin; --wnr > 0;) {
       if (wp->w_next == NULL) {
@@ -5135,11 +5251,9 @@ static void ex_only(exarg_T *eap)
       }
       wp = wp->w_next;
     }
-  } else {
-    wp = curwin;
-  }
-  if (wp != curwin) {
-    win_goto(wp);
+    if (wp != curwin) {
+      win_goto(wp);
+    }
   }
   close_others(true, eap->forceit);
 }
@@ -5151,11 +5265,11 @@ static void ex_hide(exarg_T *eap)
     return;
   }
 
+  win_T *win = NULL;
   if (eap->addr_count == 0) {
-    win_close(curwin, false, eap->forceit);  // don't free buffer
+    win = curwin;
   } else {
     int winnr = 0;
-    win_T *win = NULL;
 
     FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
       winnr++;
@@ -5167,8 +5281,13 @@ static void ex_hide(exarg_T *eap)
     if (win == NULL) {
       win = lastwin;
     }
-    win_close(win, false, eap->forceit);
   }
+
+  if (!win->w_floating && window_layout_locked(CMD_hide)) {
+    return;
+  }
+
+  win_close(win, false, eap->forceit);  // don't free buffer
 }
 
 /// ":stop" and ":suspend": Suspend Vim.
@@ -5195,6 +5314,7 @@ static void ex_exit(exarg_T *eap)
     return;
   }
 
+  bool save_exiting = exiting;
   // we plan to exit if there is only one relevant window
   if (check_more(false, eap->forceit) == OK && only_one_window()) {
     exiting = true;
@@ -5206,13 +5326,13 @@ static void ex_exit(exarg_T *eap)
       || before_quit_autocmds(curwin, false, eap->forceit)
       || check_more(true, eap->forceit) == FAIL
       || (only_one_window() && check_changed_any(eap->forceit, false))) {
-    not_exiting();
+    not_exiting(save_exiting);
   } else {
     if (only_one_window()) {
       // quit last window, exit Vim
       getout(0);
     }
-    not_exiting();
+    not_exiting(save_exiting);
     // Quit current window, may free the buffer.
     win_close(curwin, !buf_hide(curwin->w_buffer), eap->forceit);
   }
@@ -5597,6 +5717,7 @@ static void ex_tabs(exarg_T *eap)
 {
   int tabcount = 1;
 
+  msg_ext_set_kind("list_cmd");
   msg_start();
   msg_scroll = true;
 
@@ -5609,7 +5730,9 @@ static void ex_tabs(exarg_T *eap)
       break;
     }
 
-    msg_putchar('\n');
+    if (msg_col > 0) {
+      msg_putchar('\n');
+    }
     vim_snprintf(IObuff, IOSIZE, _("Tab page %d"), tabcount++);
     msg_outtrans(IObuff, HLF_T, false);
     os_breakcheck();
@@ -5617,7 +5740,7 @@ static void ex_tabs(exarg_T *eap)
     FOR_ALL_WINDOWS_IN_TAB(wp, tp) {
       if (got_int) {
         break;
-      } else if (!wp->w_config.focusable) {
+      } else if (!wp->w_config.focusable || wp->w_config.hide) {
         continue;
       }
 
@@ -5825,6 +5948,9 @@ void do_exedit(exarg_T *eap, win_T *old_curwin)
                         || eap->cmdidx == CMD_view)) {
     exmode_active = false;
     ex_pressedreturn = false;
+    if (ui_has(kUICmdline)) {
+      ui_ext_cmdline_block_leave();
+    }
     if (*eap->arg == NUL) {
       // Special case:  ":global/pat/visual\NLvi-commands"
       if (global_busy) {
@@ -8001,6 +8127,21 @@ static void ex_terminal(exarg_T *eap)
   }
 
   do_cmdline_cmd(ex_cmd);
+}
+
+/// ":lsp {subcmd} {clients}"
+static void ex_lsp(exarg_T *eap)
+{
+  Error err = ERROR_INIT;
+  MAXSIZE_TEMP_ARRAY(args, 1);
+
+  ADD_C(args, CSTR_AS_OBJ(eap->arg));
+
+  NLUA_EXEC_STATIC("require'vim._core.ex_cmd'.ex_lsp(...)", args, kRetNilBool, NULL, &err);
+  if (ERROR_SET(&err)) {
+    emsg_multiline(err.msg, "lua_error", HLF_E, true);
+  }
+  api_clear_error(&err);
 }
 
 /// ":fclose"

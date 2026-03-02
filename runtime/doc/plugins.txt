@@ -15,8 +15,8 @@ available from the global `vim` module namespace. Some of the plugins are
 loaded by default while others are not loaded until requested by |:packadd|.
 
 ==============================================================================
-Standard plugins ~
-                                                        *standard-plugin-list*
+Standard plugins                                        *standard-plugin-list*
+
 Help-link		Loaded	Short description ~
 |difftool|		No	Compares two directories or files side-by-side
 |editorconfig|		Yes	Detect and interpret editorconfig
@@ -48,14 +48,14 @@ Builtin plugin: difftool                                            *difftool*
 :DiffTool {left} {right}                                           *:DiffTool*
 Compares two directories or files side-by-side.
 Supports directory diffing, rename detection, and highlights changes
-in quickfix list.
+in quickfix list. Replaces the built-in `nvim -d` diff mode with this interface.
 
 The plugin is not loaded by default; use `:packadd nvim.difftool` before
 invoking `:DiffTool`.
 
-Example `git difftool -d` integration using `DiffTool` command: >ini
+Example `git difftool -d` integration using `nvim -d` replacement: >ini
     [difftool "nvim_difftool"]
-      cmd = nvim -c \"packadd nvim.difftool\" -c \"DiffTool $LOCAL $REMOTE\"
+      cmd = nvim -c \"packadd nvim.difftool\" -d \"$LOCAL\" \"$REMOTE\"
     [diff]
       tool = nvim_difftool
 <
@@ -84,11 +84,26 @@ open({left}, {right}, {opt})                                 *difftool.open()*
 ==============================================================================
 Builtin plugin: editorconfig                                    *editorconfig*
 
-Nvim supports EditorConfig. When a file is opened, after running |ftplugin|s
-and |FileType| autocommands, Nvim searches all parent directories of that file
-for ".editorconfig" files, parses them, and applies any properties that match
-the opened file. Think of it like 'modeline' for an entire (recursive)
-directory. For more information see https://editorconfig.org/.
+EditorConfig is like 'modeline' for an entire (recursive) directory. When a
+file is opened, after running |ftplugin|s and |FileType| autocommands, the
+EditorConfig feature searches all parent directories of that file for
+`.editorconfig` files, parses them, and applies their properties. For more
+information see https://editorconfig.org/.
+
+Example `.editorconfig` file: >ini
+    root = true
+
+    [*]
+    charset = utf-8
+    end_of_line = lf
+    indent_size = 4
+    indent_style = space
+    max_line_length = 42
+    trim_trailing_whitespace = true
+
+    [*.{diff,md}]
+    trim_trailing_whitespace = false
+<
 
                                                *g:editorconfig* *b:editorconfig*
 
@@ -185,6 +200,8 @@ The plugin can be disabled by setting `g:loaded_spellfile_plugin = 1`.
                       otherwise https://ftp.nluug.nl/pub/vim/runtime/spell.
       • {timeout_ms}  (`integer`, default: 15000) Number of milliseconds after
                       which the |vim.net.request()| times out.
+      • {confirm}     (`boolean`, default: `true`) Whether to ask user to
+                      confirm download.
 
 
 config({opts})                                            *spellfile.config()*
@@ -255,6 +272,8 @@ open({opts})                                                 *undotree.open()*
 
     While in the window, moving the cursor changes the undo.
 
+    Closes the window if it is already open
+
     Load the plugin with this command: >
                 packadd nvim.undotree
 <
@@ -274,6 +293,10 @@ open({opts})                                                 *undotree.open()*
                   the window. If a function, it accepts the buffer number of
                   the source buffer as its only argument and should return a
                   string.
+
+    Return: ~
+        (`boolean?`) Returns true if the window was already open, nil
+        otherwise
 
 
  vim:tw=78:ts=8:sw=4:sts=4:et:ft=help:norl:

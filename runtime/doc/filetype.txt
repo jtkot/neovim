@@ -136,6 +136,7 @@ what kind of file it is.  This doesn't always work.  A number of global
 variables can be used to overrule the filetype used for certain extensions:
 
 	file name	variable ~
+	`*.app`		g:filetype_app
 	`*.asa`		g:filetype_asa		|ft-aspperl-syntax|
 						|ft-aspvbs-syntax|
 	`*.asm`		g:asmsyntax		|ft-asm-syntax|
@@ -900,15 +901,16 @@ QUERY					                *ft-query-plugin*
 
 
 Linting of treesitter queries for installed parsers using
-|vim.treesitter.query.lint()| is enabled by default on `BufEnter` and
-`BufWrite`. To change the events that trigger linting, use >lua
+|vim.treesitter.query.lint()| is disabled by default. To enable
+linting when opening and writing buffers, add >lua
+
+	vim.g.query_lint_on = { 'BufEnter', 'BufWrite' }
+<
+to your config. To update diagnostics when editing, use >lua
 
 	vim.g.query_lint_on = { 'InsertLeave', 'TextChanged' }
 <
-To disable linting completely, set >lua
-
-	vim.g.query_lint_on = {}
-<
+For a dedicated language server, see https://github.com/ribru17/ts_query_ls.
 
 QF QUICKFIX					    *qf.vim* *ft-qf-plugin*
 

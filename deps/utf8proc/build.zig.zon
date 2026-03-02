@@ -5,8 +5,9 @@
 
     .dependencies = .{
         .utf8proc = .{
-            .url = "git+https://github.com/juliastrings/utf8proc?ref=v2.11.1#53f0bac76f5d5bd3ed69d1a06ee5b200c8940610",
-            .hash = "N-V-__8AAEmnKADrO-sasMEghlX7HQYra9O95u2w_4wdycuU",
+            .url = "git+https://github.com/juliastrings/utf8proc?ref=v2.11.3#e5e799221b45bbb90f5fdc5c69b6b8dfbf017e78",
+            .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
+            .lazy = true,
         },
     },
 }

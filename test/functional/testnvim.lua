@@ -18,7 +18,7 @@ local sleep = uv.sleep
 --- Functions executing in the current nvim session/process being tested.
 local M = {}
 
-local lib_path = t.is_zig_build() and './zig-out/lib' or './build/lib/nvim/'
+local lib_path = t.paths.test_build_dir .. (t.is_zig_build() and '/lib' or '/lib/nvim')
 M.runtime_set = 'set runtimepath^=' .. lib_path
 
 M.nvim_prog = (os.getenv('NVIM_PRG') or t.paths.test_build_dir .. '/bin/nvim')
@@ -26,7 +26,7 @@ M.nvim_prog = (os.getenv('NVIM_PRG') or t.paths.test_build_dir .. '/bin/nvim')
 M.nvim_set = (
   'set shortmess+=IS background=light noswapfile noautoindent startofline'
   .. ' laststatus=1 undodir=. directory=. viewdir=. backupdir=.'
-  .. ' belloff= wildoptions-=pum joinspaces noshowcmd noruler nomore redrawdebug=invalid'
+  .. " belloff= wildoptions-=pum joinspaces noshowcmd noruler nomore redrawdebug=invalid shada=!,'100,<50,s10,h"
   .. [[ statusline=%<%f\ %{%nvim_eval_statusline('%h%w%m%r',\ {'maxwidth':\ 30}).width\ >\ 0\ ?\ '%h%w%m%r\ '\ :\ ''%}%=%{%\ &showcmdloc\ ==\ 'statusline'\ ?\ '%-10.S\ '\ :\ ''\ %}%{%\ exists('b:keymap_name')\ ?\ '<'..b:keymap_name..'>\ '\ :\ ''\ %}%{%\ &ruler\ ?\ (\ &rulerformat\ ==\ ''\ ?\ '%-14.(%l,%c%V%)\ %P'\ :\ &rulerformat\ )\ :\ ''\ %}]]
 )
 M.nvim_argv = {
@@ -320,7 +320,9 @@ function M.run(request_cb, notification_cb, setup_cb, timeout)
 end
 
 function M.stop()
-  assert(session):stop()
+  if loop_running then
+    assert(session):stop()
+  end
 end
 
 -- Use for commands which expect nvim to quit.
@@ -458,7 +460,9 @@ end
 
 --- Starts a new, global Nvim session and clears the current one.
 ---
---- Note: Use `new_session()` to start a session without replacing the current one.
+--- Note:
+--- - Use `new_session()` to start a session without replacing the current one.
+--- - Use `spawn_wait()` to start Nvim without connecting a RPC session.
 ---
 --- Parameters are interpreted as startup args, OR a map with these keys:
 --- - args:       List: Args appended to the default `nvim_argv` set.
@@ -488,7 +492,7 @@ local n_processes = 0
 --- Does not replace the current global session, unlike `clear()`.
 ---
 --- @param keep boolean (default: false) Don't close the current global session.
---- @param ... string Nvim CLI args (or see overload)
+--- @param ... string Nvim CLI args
 --- @return test.Session
 --- @overload fun(keep: boolean, opts: test.session.Opts): test.Session
 function M.new_session(keep, ...)
@@ -510,12 +514,12 @@ function M.new_session(keep, ...)
     end
     if delta > 500 then
       print(
-        ('Nvim session %s took %d milliseconds to exit\n'):format(test_id, delta)
-          .. 'This indicates a likely problem with the test even if it passed!\n'
+        ('\nNvim session %s took %d milliseconds to exit\n'):format(test_id, delta)
+          .. 'This indicates a likely problem with the test even if it passed!'
       )
       io.stdout:flush()
     end
-  end)
+  end, true)
   n_processes = n_processes + 1
 
   local new_session = Session.new(proc)
@@ -610,21 +614,22 @@ function M._new_argv(...)
         assert(type(v) == 'string')
         env_opt[k] = v
       end
+      -- Set these from the environment unless the caller defined them.
       for _, k in ipairs({
-        'HOME',
         'ASAN_OPTIONS',
-        'TSAN_OPTIONS',
-        'MSAN_OPTIONS',
+        'GCOV_ERROR_FILE',
+        'HOME',
         'LD_LIBRARY_PATH',
-        'PATH',
+        'MSAN_OPTIONS',
+        'NVIM_TEST',
         'NVIM_LOG_FILE',
         'NVIM_RPLUGIN_MANIFEST',
-        'GCOV_ERROR_FILE',
-        'XDG_DATA_DIRS',
+        'PATH',
         'TMPDIR',
+        'TSAN_OPTIONS',
         'VIMRUNTIME',
+        'XDG_DATA_DIRS',
       }) do
-        -- Set these from the environment unless the caller defined them.
         if not env_opt[k] then
           env_opt[k] = os.getenv(k)
         end
@@ -681,8 +686,7 @@ end
 
 --- Sets Nvim shell to powershell.
 ---
---- @param fake (boolean) If true, a fake will be used if powershell is not
----             found on the system.
+--- @param fake boolean? Use a fake if powershell is not found on the system.
 --- @returns true if powershell was found on the system, else false.
 function M.set_shell_powershell(fake)
   local found = M.has_powershell()

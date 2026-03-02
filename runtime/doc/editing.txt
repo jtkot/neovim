@@ -1620,7 +1620,7 @@ There are three different types of searching:
    special wildcard when it is at the start of a name.
 
    The usage of "*" is quite simple: It matches 0 or more characters.  In a
-   search pattern this would be ".*".  Note that the "." is not used for file
+   search pattern this would be `.*`.  Note that the "." is not used for file
    searching.
 
    "**" is more sophisticated:
@@ -1715,9 +1715,9 @@ mark a file as trusted or untrusted using the |:trust| command or the
 :trust [++deny] [++remove] [file]
 
 			Manage trusted files. Without ++ options, :trust marks
-			the current buffer as trusted, keyed on a hash of its
-			contents. The trust list is stored on disk, Nvim will
-			re-use it after restarting.
+			[file] (or current buffer if no [file]) as trusted,
+			keyed on a hash of its contents. The trust list is
+			stored on disk, Nvim will re-use it after restarting.
 
 			[++deny] marks [file] (or current buffer if no [file])
 			as untrusted: it will never be executed, 'exrc' will

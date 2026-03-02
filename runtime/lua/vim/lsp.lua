@@ -35,13 +35,6 @@ local changetracking = lsp._changetracking
 ---@nodoc
 lsp.rpc_response_error = lsp.rpc.rpc_response_error
 
-lsp._resolve_to_request = {
-  ['codeAction/resolve'] = 'textDocument/codeAction',
-  ['codeLens/resolve'] = 'textDocument/codeLens',
-  ['documentLink/resolve'] = 'textDocument/documentLink',
-  ['inlayHint/resolve'] = 'textDocument/inlayHint',
-}
-
 -- TODO improve handling of scratch buffers with LSP attached.
 
 --- Called by the client when trying to call a method that's not
@@ -118,26 +111,6 @@ function lsp._buf_get_full_text(bufnr)
     text = text .. line_ending
   end
   return text
-end
-
---- Memoizes a function. On first run, the function return value is saved and
---- immediately returned on subsequent runs. If the function returns a multival,
---- only the first returned value will be memoized and returned. The function will only be run once,
---- even if it has side effects.
----
----@generic T: function
----@param fn (T) Function to run
----@return T
-local function once(fn)
-  local value --- @type function
-  local ran = false
-  return function(...)
-    if not ran then
-      value = fn(...) --- @type function
-      ran = true
-    end
-    return value
-  end
 end
 
 --- @param client vim.lsp.Client
@@ -225,7 +198,7 @@ end
 --- provide the root dir, or LSP will not be activated for the buffer. Thus a `root_dir()` function
 --- can dynamically decide per-buffer whether to activate (or skip) LSP.
 --- See example at |vim.lsp.enable()|.
---- @field root_dir? string|fun(bufnr: integer, on_dir:fun(root_dir?:string))
+--- @field root_dir? string|fun(bufnr: integer, on_dir:fun(root_dir?:string)) #
 ---
 --- [lsp-root_markers]()
 --- Filename(s) (".git/", "package.json", …) used to decide the workspace root. Unused if `root_dir`
@@ -345,12 +318,12 @@ end
 
 --- @nodoc
 --- @class vim.lsp.config
---- @field [string] vim.lsp.Config
+--- @field [string] vim.lsp.Config?
 --- @field package _configs table<string,vim.lsp.Config>
 lsp.config = setmetatable({ _configs = {} }, {
   --- @param self vim.lsp.config
   --- @param name string
-  --- @return vim.lsp.Config
+  --- @return vim.lsp.Config?
   __index = function(self, name)
     validate_config_name(name)
 
@@ -371,7 +344,7 @@ lsp.config = setmetatable({ _configs = {} }, {
           --- @type vim.lsp.Config?
           rtp_config = vim.tbl_deep_extend('force', rtp_config or {}, config)
         else
-          log.warn(('%s does not return a table, ignoring'):format(v))
+          error(('%s: not a table'):format(v))
         end
       end
 
@@ -515,22 +488,25 @@ local function lsp_enable_callback(bufnr)
   end
 end
 
---- Auto-starts LSP when a buffer is opened, based on the |lsp-config| `filetypes`, `root_markers`,
---- and `root_dir` fields.
+--- Auto-activates LSP in each buffer based on the |lsp-config| `filetypes`, `root_markers`, and
+--- `root_dir`.
+---
+--- To disable, pass `enable=false`: Stops related clients and servers (force-stops servers after
+--- a timeout, unless `exit_timeout=false`).
+---
+--- Raises an error under the following conditions:
+--- - `{name}` is not a valid LSP config name (for example, `'*'`).
+--- - `{name}` corresponds to an LSP config file which raises an error.
+---
+--- If an error is raised when multiple names are provided, this function will
+--- have no side-effects; it will not enable/disable any configs, including
+--- ones which contain no errors.
 ---
 --- Examples:
 ---
 --- ```lua
 --- vim.lsp.enable('clangd')
 --- vim.lsp.enable({'lua_ls', 'pyright'})
---- ```
----
---- Example: [lsp-restart]() Passing `false` stops and detaches the client(s). Thus you can
---- "restart" LSP by disabling and re-enabling a given config:
----
---- ```lua
---- vim.lsp.enable('clangd', false)
---- vim.lsp.enable('clangd', true)
 --- ```
 ---
 --- Example: To _dynamically_ decide whether LSP is activated, define a |lsp-root_dir()| function
@@ -549,17 +525,31 @@ end
 ---@since 13
 ---
 --- @param name string|string[] Name(s) of client(s) to enable.
---- @param enable? boolean `true|nil` to enable, `false` to disable (actively stops and detaches
---- clients as needed)
+--- @param enable? boolean If `true|nil`, enables auto-activation of the given LSP config on current
+--- and future buffers. If `false`, disables auto-activation and stops related LSP clients and
+--- servers (force-stops servers after `exit_timeout` milliseconds).
 function lsp.enable(name, enable)
   validate('name', name, { 'string', 'table' })
 
   local names = vim._ensure_list(name) --[[@as string[] ]]
+  local configs = {} --- @type table<string,{resolved_config:vim.lsp.Config?}>
+
+  -- Check for errors, and abort with no side-effects if there is one.
   for _, nm in ipairs(names) do
-    if nm == '*' then
-      error('Invalid name')
+    if nm:match('%*') then
+      error('LSP config name cannot contain wildcard ("*")')
     end
-    lsp._enabled_configs[nm] = enable ~= false and {} or nil
+
+    -- Raise error if `lsp.config[nm]` raises an error, instead of waiting for
+    -- the error to be triggered by `lsp_enable_callback()`.
+    if enable ~= false then
+      configs[nm] = { resolved_config = lsp.config[nm] }
+    end
+  end
+
+  -- Now that there can be no errors, enable/disable all names.
+  for _, nm in ipairs(names) do
+    lsp._enabled_configs[nm] = enable ~= false and configs[nm] or nil
   end
 
   if not next(lsp._enabled_configs) then
@@ -581,13 +571,13 @@ function lsp.enable(name, enable)
 
   -- Ensure any pre-existing buffers start/stop their LSP clients.
   if enable ~= false then
-    if vim.v.vim_did_enter == 1 and next(lsp._enabled_configs) then
+    if (vim.v.vim_did_enter == 1 or vim.fn.did_filetype() == 1) and next(lsp._enabled_configs) then
       vim.cmd.doautoall('nvim.lsp.enable FileType')
     end
   else
     for _, nm in ipairs(names) do
       for _, client in ipairs(lsp.get_clients({ name = nm })) do
-        client:stop()
+        client:stop(client.exit_timeout)
       end
     end
   end
@@ -823,7 +813,7 @@ end
 local function text_document_did_save_handler(bufnr)
   bufnr = vim._resolve_bufnr(bufnr)
   local uri = vim.uri_from_bufnr(bufnr)
-  local text = once(lsp._buf_get_full_text)
+  local text = vim.func._memoize('concat', lsp._buf_get_full_text)
   for _, client in ipairs(lsp.get_clients({ bufnr = bufnr })) do
     local name = api.nvim_buf_get_name(bufnr)
     local old_name = changetracking._get_and_set_name(client, bufnr, name)
@@ -1055,8 +1045,8 @@ end
 --- vim.lsp.stop_client(vim.lsp.get_clients())
 --- ```
 ---
---- By default asks the server to shutdown, unless stop was requested
---- already for this client, then force-shutdown is attempted.
+--- By default asks the server to shutdown, unless stop was requested already for this client (then
+--- force-shutdown is attempted, unless `exit_timeout=false`).
 ---
 ---@deprecated
 ---@param client_id integer|integer[]|vim.lsp.Client[] id, list of id's, or list of |vim.lsp.Client| objects
@@ -1137,14 +1127,42 @@ function lsp.get_active_clients(filter)
   return lsp.get_clients(filter)
 end
 
+-- Minimum time before warning about LSP exit_timeout on Nvim exit.
+local min_warn_exit_timeout = 100
+
 api.nvim_create_autocmd('VimLeavePre', {
   desc = 'vim.lsp: exit handler',
   callback = function()
     local active_clients = lsp.get_clients()
     log.info('exit_handler', active_clients)
 
+    local max_timeout = 0
     for _, client in pairs(active_clients) do
-      client:stop(client.flags.exit_timeout)
+      max_timeout = math.max(max_timeout, tonumber(client.exit_timeout) or 0)
+      client:stop(client.exit_timeout)
+    end
+
+    local exit_warning_timer = max_timeout > min_warn_exit_timeout
+      and vim.defer_fn(function()
+        api.nvim_echo({
+          {
+            string.format(
+              'Waiting %ss for LSP exit (Press Ctrl-C to force exit)',
+              max_timeout / 1e3
+            ),
+            'WarningMsg',
+          },
+        }, true, {})
+      end, min_warn_exit_timeout)
+
+    vim.wait(max_timeout, function()
+      return vim.iter(active_clients):all(function(client)
+        return client.rpc.is_closing()
+      end)
+    end)
+
+    if exit_warning_timer and not exit_warning_timer:is_closing() then
+      exit_warning_timer:close()
     end
   end,
 })
@@ -1551,6 +1569,11 @@ end
 ---@param handler (lsp.Handler) See |lsp-handler|
 ---@param override_config (table) Table containing the keys to override behavior of the {handler}
 function lsp.with(handler, override_config)
+  vim.deprecate(
+    'vim.lsp.with()',
+    'Pass the configuration to equivalent functions in `vim.lsp.buf`',
+    '0.12'
+  )
   return function(err, result, ctx, config)
     return handler(err, result, ctx, vim.tbl_deep_extend('force', config or {}, override_config))
   end

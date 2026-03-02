@@ -1,3 +1,5 @@
+-- Default user-commands, autocmds, mappings, menus.
+
 --- Default user commands
 do
   vim.api.nvim_create_user_command('Inspect', function(cmd)
@@ -135,7 +137,7 @@ do
     { silent = true, expr = true, desc = ':help v_@-default' }
   )
 
-  --- Map |gx| to call |vim.ui.open| on the <cfile> at cursor.
+  --- Map |gx| to call |vim.ui.open| on the `textDocument/documentLink` or <cfile> at cursor.
   do
     local function do_open(uri)
       local cmd, err = vim.ui.open(uri)
@@ -219,11 +221,11 @@ do
       vim.lsp.buf.type_definition()
     end, { desc = 'vim.lsp.buf.type_definition()' })
 
-    vim.keymap.set('x', 'an', function()
+    vim.keymap.set({ 'x', 'o' }, 'an', function()
       vim.lsp.buf.selection_range(vim.v.count1)
     end, { desc = 'vim.lsp.buf.selection_range(vim.v.count1)' })
 
-    vim.keymap.set('x', 'in', function()
+    vim.keymap.set({ 'x', 'o' }, 'in', function()
       vim.lsp.buf.selection_range(-vim.v.count1)
     end, { desc = 'vim.lsp.buf.selection_range(-vim.v.count1)' })
 
@@ -440,13 +442,13 @@ do
     -- Add empty lines
     vim.keymap.set('n', '[<Space>', function()
       -- TODO: update once it is possible to assign a Lua function to options #25672
-      vim.go.operatorfunc = "v:lua.require'vim._buf'.space_above"
+      vim.go.operatorfunc = "v:lua.require'vim._core.util'.space_above"
       return 'g@l'
     end, { expr = true, desc = 'Add empty line above cursor' })
 
     vim.keymap.set('n', ']<Space>', function()
       -- TODO: update once it is possible to assign a Lua function to options #25672
-      vim.go.operatorfunc = "v:lua.require'vim._buf'.space_below"
+      vim.go.operatorfunc = "v:lua.require'vim._core.util'.space_below"
       return 'g@l'
     end, { expr = true, desc = 'Add empty line below cursor' })
   end
@@ -567,7 +569,14 @@ do
           red, green, blue = 65535, 65535, 65535
         end
         local command = fg_request and 10 or 11
-        local data = string.format('\027]%d;rgb:%04x/%04x/%04x\007', command, red, green, blue)
+        local data = string.format(
+          '\027]%d;rgb:%04x/%04x/%04x%s',
+          command,
+          red,
+          green,
+          blue,
+          args.data.terminator
+        )
         vim.api.nvim_chan_send(channel, data)
       end
     end,
@@ -805,13 +814,25 @@ do
       -- an OSC 11 response from the terminal emulator. If the user has set
       -- 'background' explicitly then we will delete this autocommand,
       -- effectively disabling automatic background setting.
-      local force = false
+      local did_dsr_response = false
       local id = vim.api.nvim_create_autocmd('TermResponse', {
         group = group,
         nested = true,
         desc = "Update the value of 'background' automatically based on the terminal emulator's background color",
         callback = function(args)
           local resp = args.data.sequence ---@type string
+
+          -- DSR response that should come after the OSC 11 response if the
+          -- terminal supports it.
+          if string.match(resp, '^\027%[0n$') then
+            did_dsr_response = true
+            -- Don't delete the autocmd because the bg response may come
+            -- after the DSR response if the terminal handles requests out
+            -- of sequence. In that case, the background will simply be set
+            -- later in the startup sequence.
+            return false
+          end
+
           local r, g, b = parseosc11(resp)
           if r and g and b then
             local rr = parsecolor(r)
@@ -821,15 +842,20 @@ do
             if rr and gg and bb then
               local luminance = (0.299 * rr) + (0.587 * gg) + (0.114 * bb)
               local bg = luminance < 0.5 and 'dark' or 'light'
-              setoption('background', bg, force)
+              vim.api.nvim_set_option_value('background', bg, {})
 
-              -- On the first query response, don't force setting the option in
-              -- case the user has already set it manually. If they have, then
-              -- this autocommand will be deleted. If they haven't, then we do
-              -- want to force setting the option to override the value set by
-              -- this autocommand.
-              if not force then
-                force = true
+              -- Ensure OptionSet still triggers when we set the background during startup
+              if vim.v.vim_did_enter == 0 then
+                vim.api.nvim_create_autocmd('VimEnter', {
+                  group = group,
+                  once = true,
+                  nested = true,
+                  callback = function()
+                    vim.api.nvim_exec_autocmds('OptionSet', {
+                      pattern = 'background',
+                    })
+                  end,
+                })
               end
             end
           end
@@ -841,13 +867,41 @@ do
         nested = true,
         once = true,
         callback = function()
-          if vim.api.nvim_get_option_info2('background', {}).was_set then
+          local optinfo = vim.api.nvim_get_option_info2('background', {})
+          local sid_lua = -8
+          if
+            optinfo.was_set
+            and optinfo.last_set_sid ~= sid_lua
+            and next(vim.api.nvim_get_autocmds({ id = id })) ~= nil
+          then
             vim.api.nvim_del_autocmd(id)
           end
         end,
       })
 
-      vim.api.nvim_ui_send('\027]11;?\007')
+      -- Send OSC 11 query along with DSR sequence to determine whether
+      -- terminal supports the query. If the DSR response comes first,
+      -- the terminal most likely doesn't support the bg color query,
+      -- and we don't have to keep waiting for a bg color response.
+      -- #32109
+      local osc11 = '\027]11;?\007'
+      local dsr = '\027[5n'
+      vim.api.nvim_ui_send(osc11 .. dsr)
+
+      -- Wait until detection of OSC 11 capabilities is complete to
+      -- ensure background is automatically set before user config.
+      if
+        not vim.wait(100, function()
+          return did_dsr_response
+        end, 1)
+        -- Don't show the warning when running tests to avoid flakiness.
+        and os.getenv('NVIM_TEST') == nil
+      then
+        vim.notify(
+          'defaults.lua: Did not detect DSR response from terminal. This results in a slower startup time.',
+          vim.log.levels.WARN
+        )
+      end
     end
 
     --- If the TUI (term_has_truecolor) was able to determine that the host
@@ -951,37 +1005,6 @@ do
       end
     end
   end
-
-  vim.api.nvim_create_autocmd('VimEnter', {
-    group = vim.api.nvim_create_augroup('nvim.exrc', {}),
-    desc = 'Find exrc files in parent directories',
-    callback = function()
-      if not vim.o.exrc then
-        return
-      end
-      local files = vim.fs.find({ '.nvim.lua', '.nvimrc', '.exrc' }, {
-        type = 'file',
-        upward = true,
-        limit = math.huge,
-        -- exrc in cwd already handled from C, thus start in parent directory.
-        path = vim.fs.dirname((vim.uv.cwd())),
-      })
-      for _, file in ipairs(files) do
-        local trusted = vim.secure.read(file) --[[@as string|nil]]
-        if trusted then
-          if vim.endswith(file, '.lua') then
-            assert(loadstring(trusted, '@' .. file))()
-          else
-            vim.api.nvim_exec2(trusted, {})
-          end
-        end
-        -- If the user unset 'exrc' in the current exrc then stop searching
-        if not vim.o.exrc then
-          return
-        end
-      end
-    end,
-  })
 
   if tty then
     -- Show progress bars in supporting terminals

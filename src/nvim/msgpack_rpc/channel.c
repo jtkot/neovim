@@ -161,7 +161,9 @@ Object rpc_send_call(uint64_t id, const char *method_name, Array args, ArenaMem 
   LOOP_PROCESS_EVENTS_UNTIL(&main_loop, channel->events, -1, frame.returned || rpc->closed);
   (void)kv_pop(rpc->call_stack);
 
-  if (rpc->closed) {
+  // !frame.returned implies rpc->closed.
+  // If frame.returned is true, its memory needs to be freed, so don't return here.
+  if (!frame.returned) {
     api_set_error(err, kErrorTypeException, "Invalid channel: %" PRIu64, id);
     channel_decref(channel);
     return NIL;
@@ -391,7 +393,7 @@ bool rpc_write_raw(uint64_t id, WBuffer *buffer)
 
 static bool channel_write(Channel *channel, WBuffer *buffer)
 {
-  bool success;
+  int err = 0;
 
   if (channel->rpc.closed) {
     wstream_release_wbuffer(buffer);
@@ -401,24 +403,24 @@ static bool channel_write(Channel *channel, WBuffer *buffer)
   if (channel->streamtype == kChannelStreamInternal) {
     channel_incref(channel);
     CREATE_EVENT(channel->events, internal_read_event, channel, buffer);
-    success = true;
   } else {
     Stream *in = channel_instream(channel);
-    success = wstream_write(in, buffer);
+    err = wstream_write(in, buffer);
   }
 
-  if (!success) {
+  if (err != 0) {
     // If the write failed for any reason, close the channel
     char buf[256];
     snprintf(buf,
              sizeof(buf),
-             "ch %" PRIu64 ": stream write failed. "
+             "ch %" PRIu64 ": stream write failed: %s. "
              "RPC canceled; closing channel",
-             channel->id);
-    chan_close_on_err(channel, buf, LOGLVL_ERR);
+             channel->id, os_strerror(err));
+    // UV_EPIPE can happen if pipe is closed by peer and shouldn't be an error.
+    chan_close_on_err(channel, buf, err == UV_EPIPE ? LOGLVL_INF : LOGLVL_ERR);
   }
 
-  return success;
+  return err == 0;
 }
 
 static void internal_read_event(void **argv)
@@ -530,9 +532,13 @@ static void chan_close_on_err(Channel *channel, char *msg, int loglevel)
 {
   for (size_t i = 0; i < kv_size(channel->rpc.call_stack); i++) {
     ChannelCallFrame *frame = kv_A(channel->rpc.call_stack, i);
+    if (frame->returned) {
+      continue;  // Don't overwrite an already received result. #24214
+    }
     frame->returned = true;
     frame->errored = true;
-    frame->result = CSTR_TO_OBJ(msg);
+    frame->result = CSTR_TO_ARENA_OBJ(&channel->rpc.unpacker->arena, msg);
+    frame->result_mem = arena_finish(&channel->rpc.unpacker->arena);
   }
 
   channel_close(channel->id, kChannelPartRpc, NULL);

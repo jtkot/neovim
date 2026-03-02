@@ -6,30 +6,35 @@
 
     .dependencies = .{
         .zlua = .{
-            .url = "git+https://github.com/natecraddock/ziglua#a4d08d97795c312e63a0f09d456f7c6d280610b4",
-            .hash = "zlua-0.1.0-hGRpC5c9BQAfU5bkkFfLV9B4a7Prw8N7JPIFAZBbRCkq",
+            .url = "git+https://github.com/natecraddock/ziglua#a1cae53f6b841dd4fa108103f4bd0f515ca29cfb",
+            .hash = "zlua-0.1.0-hGRpCwxDBQD25I09a5dhcaNCEontuUsq2pgB34wjugHQ",
         },
         .lpeg = .{
             .url = "https://github.com/neovim/deps/raw/d495ee6f79e7962a53ad79670cb92488abe0b9b4/opt/lpeg-1.1.0.tar.gz",
             .hash = "N-V-__8AAMnaAwCEutreuREG3QayBVEZqUTDQFY1Nsrv2OIt",
+            .lazy = true,
         },
         .luv = .{
-            .url = "git+https://github.com/luvit/luv?ref=1.51.0-1#4c9fbc6cf6f3338bb0e0426710cf885ee557b540",
-            .hash = "N-V-__8AAMlNDwCY07jUoMiq3iORXdZy0uFWKiHsy8MaDBJA",
+            .url = "git+https://github.com/luvit/luv?ref=1.51.0-2#79f6934306367e700050de9614eab9ac01bd4d6f",
+            .hash = "N-V-__8AAI1cDwA49t_OUdHwO2-BQ8TYt3kBMnnSSicx5T-B",
+            .lazy = true,
         },
         .lua_compat53 = .{
             .url = "https://github.com/lunarmodules/lua-compat-5.3/archive/v0.13.tar.gz",
             .hash = "N-V-__8AADi-AwDnVoXwDCQvv2wcYOmN0bJLqZ44J3lwoQY2",
+            .lazy = true,
         },
         .treesitter = .{
-            .url = "git+https://github.com/tree-sitter/tree-sitter?ref=v0.25.10#f26bd44a43e8985fe7d784e87056f996c8a576c9",
-            .hash = "tree_sitter-0.26.0-Tw2sR-yCCwDF7elNfoXlZ8r2xfhEM2RMuXR9rSbPQr9b",
+            .url = "git+https://github.com/tree-sitter/tree-sitter?ref=v0.26.6#534c4a074cd461ab30d1c8a54bf733d3050221a0",
+            .hash = "tree_sitter-0.26.6-Tw2sR9-2CwCNIR7jyRSbsSPdEwPPAUD4aUaKLM-UHOnd",
+            .lazy = true,
         },
         .libuv = .{
-            .url = "git+https://github.com/allyourcodebase/libuv#a2dfd385bd2a00d6d290fda85a40a55a9d6cffc5",
-            .hash = "libuv-1.51.0-htqqv6liAADxBLIBCZT-qUh_3nRRwtNYsOFQOUmrd_sx",
+            .url = "git+https://github.com/allyourcodebase/libuv#dd606c76863c6b3ae38ea2fd7d663e8366e0f90b",
+            .hash = "libuv-1.52.0-htqqvy1nAAA0cw2oeVwWFiAY9iraPnu09wlABVGEmrak",
+            .lazy = true,
         },
-        .utf8proc = .{ .path = "./deps/utf8proc/" },
+        .utf8proc = .{ .path = "./deps/utf8proc/", .lazy = true },
         .unibilium = .{ .path = "./deps/unibilium/", .lazy = true },
         .libiconv = .{
             .url = "git+https://github.com/allyourcodebase/libiconv#9def4c8a1743380e85bcedb80f2c15b455e236f3",
@@ -45,24 +50,24 @@
             .hash = "N-V-__8AANxPSABzw3WBTSH_YkwaGAfrK6PBqAMqQedkDDim",
         },
         .treesitter_markdown = .{
-            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-markdown?ref=v0.5.1#2dfd57f547f06ca5631a80f601e129d73fc8e9f0",
-            .hash = "N-V-__8AABcZUwBZelO8MiLRwuLD1Wk34qHHbXtS4UW3Khys",
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-markdown?ref=v0.5.3#f969cd3ae3f9fbd4e43205431d0ae286014c05b5",
+            .hash = "N-V-__8AAOphUwCl_jXY5BvJ_I-kB6cZuE48ZpMar9Gq2SiD",
         },
         .treesitter_lua = .{
-            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-lua?ref=v0.4.0#4569d1c361129e71a205b94a05e158bd71b1709f",
-            .hash = "N-V-__8AAEF5CABqSL9zqc03aQsT6Nni54ZCcL98pnuDL2D3",
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-lua?ref=v0.5.0#10fe0054734eec83049514ea2e718b2a56acd0c9",
+            .hash = "N-V-__8AAE5ZCQA-BW5BOioWVkGcPTjhC5x1Qv07BH3Xt3dR",
         },
         .treesitter_vim = .{
-            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-vim?ref=v0.7.0#3dd4747082d1b717b8978211c06ef7b6cd16125b",
-            .hash = "N-V-__8AAMArVAB4uo2wg2XRs8HBviQ4Pq366cC_iRolX4Vc",
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-vim?ref=v0.8.1#3092fcd99eb87bbd0fc434aa03650ba58bd5b43b",
+            .hash = "N-V-__8AAPWmVADyg5WrfQyap9wVnE7y5EYV7I3MNEocN96-",
         },
         .treesitter_vimdoc = .{
-            .url = "git+https://github.com/neovim/tree-sitter-vimdoc?ref=v4.0.0#9f6191a98702edc1084245abd5523279d4b681fb",
-            .hash = "N-V-__8AAI4YCgD7OqxCEAmz2RqT_ohl6eA4F0fGMtLIe7nb",
+            .url = "git+https://github.com/neovim/tree-sitter-vimdoc?ref=v4.1.0#f061895a0eff1d5b90e4fb60d21d87be3267031a",
+            .hash = "N-V-__8AAI7VCgBqRcQ-vIxB8DJJFhmLG42p6rfwCWIdypSJ",
         },
         .treesitter_query = .{
-            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-query?ref=v0.7.0#60e253d3c9d6b1131a0f75c85e4bdcc9a48d5b42",
-            .hash = "N-V-__8AAGNUBAAvnkA99VqpVeC-dHymIp78MhFEixP8w7Tj",
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-query?ref=v0.8.0#a225e21d81201be77da58de614e2b7851735677a",
+            .hash = "N-V-__8AAMR5AwAzZ5_8S2p2COTEf5usBeeT4ORzh-lBGkWy",
         },
     },
     .paths = .{

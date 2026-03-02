@@ -673,8 +673,7 @@ describe('highlight', function()
       {1:  }{2:01}{3:234 67}{2:89}{5:             }|
       {4:~                        }|*2
       {7:[No Name] [+]            }|
-      {1:  }{6:-----------------------}|
-      {1:  }{6:-----------------------}|
+      {1:  }{6:-----------------------}|*2
       {1:  }                       |
       {8:[No Name]                }|
                                |
@@ -1376,6 +1375,34 @@ describe('CursorLine and CursorLineNr highlights', function()
       {1:~                        }│{1:~                       }|*6
       {3:[No Name] [+]             }{2:[No Name] [+]           }|
                                                         |
+    ]])
+  end)
+
+  it('CursorLine overlays hl group linked to Normal', function()
+    local screen = Screen.new(50, 12)
+    screen:add_extra_attr_ids({
+      [101] = { background = Screen.colors.Grey90, foreground = Screen.colors.Grey100 },
+      [102] = { background = Screen.colors.DarkGray, foreground = Screen.colors.WebGreen },
+    })
+    command('hi Normal guibg=black guifg=white')
+    command('hi def link Test Normal')
+    feed('ifoo bar<ESC>')
+    feed(':call matchadd("Test", "bar")<cr>')
+    command('set cursorline')
+    screen:expect([[
+      {21:foo }{101:ba^r}{21:                                           }|
+      {1:~                                                 }|*10
+      :call matchadd("Test", "bar")                     |
+    ]])
+    api.nvim_buf_set_lines(0, 0, -1, false, { 'aaaaa', 'bbbbb' })
+    command('hi AAA guifg=Green guibg=DarkGrey ctermfg=Green ctermbg=DarkGrey')
+    fn.matchadd('AAA', 'aaaaa')
+    command('setlocal winhighlight=Normal:NormalFloat')
+    screen:expect([[
+      {102:aaaa^a}{21:                                             }|
+      {4:bbbbb                                             }|
+      {11:~                                                 }|*9
+      :call matchadd("Test", "bar")                     |
     ]])
   end)
 end)
@@ -2641,5 +2668,19 @@ describe('fg/bg special colors', function()
     eq(new_guibg, eval('synIDattr(hlID("Visual"), "fg#")'))
     eq(new_guifg, eval('synIDattr(hlID("Visual"), "bg#")'))
     eq(new_guibg, eval('synIDattr(hlID("Visual"), "sp#")'))
+  end)
+
+  it('changed highlight is reflected in messages before redraw #17832', function()
+    local screen = Screen.new(50, 7, { rgb = true })
+    command('set termguicolors')
+    -- :echomsg in the same request, before the next redraw.
+    command('call nvim_set_hl(0, "MsgArea", {"fg": "Red"}) | echomsg "foo"')
+    screen:expect({
+      grid = [[
+        ^                                                  |
+        {1:~                                                 }|*5
+        {19:foo                                               }|
+      ]],
+    })
   end)
 end)

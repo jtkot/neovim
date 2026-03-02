@@ -152,8 +152,8 @@ local config = {
     section_order = {
       -- Sections at the top, in a specific order:
       'builtin.lua',
-      '_options.lua',
-      '_editor.lua',
+      'options.lua',
+      'editor.lua',
       '_inspector.lua',
       'shared.lua',
 
@@ -177,18 +177,21 @@ local config = {
       'secure.lua',
       'snippet.lua',
       'spell.lua',
-      '_system.lua',
+      'system.lua',
       'text.lua',
       'ui.lua',
       'uri.lua',
       'version.lua',
 
       -- Sections at the end, in a specific order:
-      '_extui.lua',
+      'ui2.lua',
     },
     files = {
-      'runtime/lua/vim/_editor.lua',
-      'runtime/lua/vim/_extui.lua',
+      'runtime/lua/vim/_core/editor.lua',
+      'runtime/lua/vim/_core/options.lua',
+      'runtime/lua/vim/_core/shared.lua',
+      'runtime/lua/vim/_core/system.lua',
+      'runtime/lua/vim/_core/ui2.lua',
       'runtime/lua/vim/_inspector.lua',
       'runtime/lua/vim/_meta/base64.lua',
       'runtime/lua/vim/_meta/builtin.lua',
@@ -198,8 +201,6 @@ local config = {
       'runtime/lua/vim/_meta/re.lua',
       'runtime/lua/vim/_meta/regex.lua',
       'runtime/lua/vim/_meta/spell.lua',
-      'runtime/lua/vim/_options.lua',
-      'runtime/lua/vim/_system.lua',
       'runtime/lua/vim/filetype.lua',
       'runtime/lua/vim/fs.lua',
       'runtime/lua/vim/glob.lua',
@@ -211,7 +212,6 @@ local config = {
       'runtime/lua/vim/pos.lua',
       'runtime/lua/vim/range.lua',
       'runtime/lua/vim/secure.lua',
-      'runtime/lua/vim/shared.lua',
       'runtime/lua/vim/snippet.lua',
       'runtime/lua/vim/text.lua',
       'runtime/lua/vim/ui.lua',
@@ -219,7 +219,7 @@ local config = {
       'runtime/lua/vim/version.lua',
     },
     fn_xform = function(fun)
-      if contains(fun.module, { 'vim.uri', 'vim.shared', 'vim._editor' }) then
+      if contains(fun.module, { 'vim.uri', 'vim._core.shared', 'vim._core.editor' }) then
         fun.module = 'vim'
       end
 
@@ -235,27 +235,32 @@ local config = {
     end,
     section_name = {
       ['_inspector.lua'] = 'inspector',
+      ['ui2.lua'] = 'ui2',
     },
     section_fmt = function(name)
       name = name:lower()
-      if name == '_editor' then
+      if name == 'editor' then
         return 'Lua module: vim'
-      elseif name == '_system' then
+      elseif name == 'system' then
         return 'Lua module: vim.system'
-      elseif name == '_options' then
+      elseif name == 'options' then
         return 'LUA-VIMSCRIPT BRIDGE'
       elseif name == 'builtin' then
         return 'VIM'
+      elseif name == 'ui2' then
+        return 'UI2'
       end
       return 'Lua module: vim.' .. name
     end,
     helptag_fmt = function(name)
-      if name == '_editor' then
+      if name == 'Editor' then
         return 'lua-vim'
-      elseif name == '_system' then
+      elseif name == 'System' then
         return 'lua-vim-system'
-      elseif name == '_options' then
+      elseif name == 'Options' then
         return 'lua-vimscript'
+      elseif name == 'ui2' then
+        return 'ui2'
       end
       return 'vim.' .. name:lower()
     end,
@@ -895,7 +900,7 @@ end
 
 --- @return string
 local function get_script_path()
-  local str = debug.getinfo(2, 'S').source:sub(2)
+  local str = debug.getinfo(2, 'S').source:gsub('^@', '')
   return str:match('(.*[/\\])') or './'
 end
 

@@ -111,7 +111,11 @@ repeat:
     }
 
     // FullName_save() is slow, don't use it when not needed.
-    if (*p != NUL || !vim_isAbsName(*fnamep)) {
+    if (*p != NUL || !vim_isAbsName(*fnamep)
+#ifdef MSWIN  // enforce drive letter on Windows paths
+        || **fnamep == '/' || **fnamep == '\\'
+#endif
+        ) {
       *fnamep = FullName_save(*fnamep, *p != NUL);
       xfree(*bufp);          // free any allocated file name
       *bufp = *fnamep;
@@ -1303,7 +1307,7 @@ static void read_file_or_blob(typval_T *argvars, typval_T *rettv, bool always_bl
 
   if (blob) {
     if (read_blob(fd, rettv, offset, size) == FAIL) {
-      semsg(_(e_notread), fname);
+      semsg(_(e_cant_read_file_str), fname);
     }
     fclose(fd);
     return;

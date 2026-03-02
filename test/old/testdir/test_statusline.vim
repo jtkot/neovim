@@ -16,6 +16,10 @@ func TearDown()
 endfunc
 
 func s:get_statusline()
+  if has('gui_running')
+    redraw!
+    sleep 1m
+  endif
   return ScreenLines(&lines - 1, &columns)[0]
 endfunc
 
@@ -60,7 +64,9 @@ func Test_statusline_will_be_disabled_with_error()
   catch
   endtry
   call assert_true(s:func_in_statusline_called)
-  call assert_equal('', &statusline)
+  " Nvim: resets to default value instead.
+  " call assert_equal('', &statusline)
+  call assert_equal(nvim_get_option_info2('statusline', {}).default, &statusline)
   set statusline=
 endfunc
 
@@ -709,6 +715,20 @@ func Test_statusline_in_sandbox()
   set equalalways& statusline&
   delfunc SandboxStatusLine
   delfunc Check_statusline_in_sandbox
+endfunc
+
+" This used to call memmove with a negative size and crash Vim
+func Test_statusline_singlebyte_negative()
+  let [_columns, _ls, _stl, _enc]  = [&columns, &ls, &stl, &enc]
+  " set encoding=latin1
+  set laststatus=2 columns=15
+  setl stl=%#ErrorMsg#abcdtàØ?}}o@`s`ÿæCú\xE%#Normal#
+  vsp
+  setl stl=%#ErrorMsg#abcdtàØ?}}o@`s`ÿæCú\xE%#Normal#
+  redraw!
+  redrawstatus
+  bw!
+  let [&columns, &ls, &stl, &enc] = [_columns, _ls, _stl, _enc]
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

@@ -1,6 +1,7 @@
 local api = vim.api
 
 ---@alias vim.lsp.capability.Name
+---| 'codelens'
 ---| 'semantic_tokens'
 ---| 'folding_range'
 ---| 'linked_editing_range'
@@ -21,7 +22,7 @@ local all_capabilities = {}
 ---@field name vim.lsp.capability.Name
 ---
 --- Static field records the method this capability requires.
----@field method vim.lsp.protocol.Method.ClientToServer
+---@field method vim.lsp.protocol.Method.ClientToServer | vim.lsp.protocol.Method.Registration
 ---
 --- Static field for retrieving the instance associated with a specific `bufnr`.
 ---

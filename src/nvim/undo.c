@@ -382,7 +382,7 @@ int u_savecommon(buf_T *buf, linenr_T top, linenr_T bot, linenr_T newbot, bool r
   u_entry_T *prev_uep;
   linenr_T size = bot - top - 1;
 
-  // If curbuf->b_u_synced == true make a new header.
+  // If buf->b_u_synced == true make a new header.
   if (buf->b_u_synced) {
     // Need to create new entry in b_changelist.
     buf->b_new_change = true;
@@ -401,7 +401,7 @@ int u_savecommon(buf_T *buf, linenr_T top, linenr_T bot, linenr_T newbot, bool r
     }
 
     // If we undid more than we redid, move the entry lists before and
-    // including curbuf->b_u_curhead to an alternate branch.
+    // including buf->b_u_curhead to an alternate branch.
     u_header_T *old_curhead = buf->b_u_curhead;
     if (old_curhead != NULL) {
       buf->b_u_newhead = old_curhead->uh_next.ptr;
@@ -608,7 +608,7 @@ int u_savecommon(buf_T *buf, linenr_T top, linenr_T bot, linenr_T newbot, bool r
   buf->b_u_newhead->uh_entry = uep;
   if (reload) {
     // buffer was reloaded, notify text change subscribers
-    curbuf->b_u_newhead->uh_flags |= UH_RELOAD;
+    buf->b_u_newhead->uh_flags |= UH_RELOAD;
   }
   buf->b_u_synced = false;
   undo_undoes = false;
@@ -1340,7 +1340,8 @@ void u_write_undo(const char *const name, const bool forceit, buf_T *const buf, 
   }
 #endif
 
-  if (p_fs && fflush(fp) == 0 && os_fsync(fd) != 0) {
+  if ((buf->b_p_fs >= 0 ? buf->b_p_fs : p_fs) && fflush(fp) == 0
+      && os_fsync(fd) != 0) {
     write_ok = false;
   }
 
@@ -1447,7 +1448,7 @@ void u_read_undo(char *name, const uint8_t *hash, const char *orig_name FUNC_ATT
       if (name == NULL) {
         verbose_enter();
       }
-      give_warning(_("File contents changed, cannot use undo info"), true);
+      give_warning(_("File contents changed, cannot use undo info"), true, true);
       if (name == NULL) {
         verbose_leave();
       }
@@ -2297,15 +2298,17 @@ static void u_undoredo(bool undo, bool do_buf_event)
 
     // Decide about the cursor position, depending on what text changed.
     // Don't set it yet, it may be invalid if lines are going to be added.
-    if (top < newlnum) {
+    {
       // If the saved cursor is somewhere in this undo block, move it to
       // the remembered position.  Makes "gwap" put the cursor back
       // where it was.
       linenr_T lnum = curhead->uh_cursor.lnum;
       if (lnum >= top && lnum <= top + newsize + 1) {
         new_curpos = curhead->uh_cursor;
-        newlnum = new_curpos.lnum - 1;
-      } else {
+        // We don't want other entries to override saved cursor
+        // position.
+        newlnum = -1;
+      } else if (top < newlnum) {
         // Use the first line that actually changed.  Avoids that
         // undoing auto-formatting puts the cursor in the previous
         // line.
@@ -2714,6 +2717,7 @@ void ex_undolist(exarg_T *eap)
     }
   }
 
+  msg_ext_set_kind("list_cmd");
   if (GA_EMPTY(&ga)) {
     msg(_("Nothing to undo"), 0);
   } else {

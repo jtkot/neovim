@@ -330,7 +330,7 @@ int ml_open(buf_T *buf)
   b0p->b0_magic_int = B0_MAGIC_INT;
   b0p->b0_magic_short = (int16_t)B0_MAGIC_SHORT;
   b0p->b0_magic_char = B0_MAGIC_CHAR;
-  xstrlcpy(xstpcpy(b0p->b0_version, "VIM "), Version, 6);
+  xstrlcpy(xstpcpy(b0p->b0_version, "VIM "), Versions[0], 6);
   long_to_char((long)mfp->mf_page_size, b0p->b0_page_size);
 
   if (!buf->b_spell) {
@@ -1041,9 +1041,12 @@ void ml_recover(bool checkext)
             // This is slow, but it works.
             if (!cannot_open) {
               line_count = pp->pb_pointer[idx].pe_line_count;
-              if (readfile(curbuf->b_ffname, NULL, lnum,
-                           pp->pb_pointer[idx].pe_old_lnum - 1, line_count,
-                           NULL, 0, false) != OK) {
+              linenr_T pe_old_lnum = pp->pb_pointer[idx].pe_old_lnum;
+              // Validate pe_line_count and pe_old_lnum from the
+              // untrusted swap file before passing to readfile().
+              if (line_count <= 0 || pe_old_lnum < 1
+                  || readfile(curbuf->b_ffname, NULL, lnum, pe_old_lnum - 1,
+                              line_count, NULL, 0, false) != OK) {
                 cannot_open = true;
               } else {
                 lnum += line_count;
@@ -1066,6 +1069,23 @@ void ml_recover(bool checkext)
           bnum = pp->pb_pointer[idx].pe_bnum;
           line_count = pp->pb_pointer[idx].pe_line_count;
           page_count = (unsigned)pp->pb_pointer[idx].pe_page_count;
+          // Validate pe_bnum and pe_page_count from the untrusted
+          // swap file before passing to mf_get(), which uses
+          // page_count to calculate allocation size.  A bogus value
+          // (e.g. 0x40000000) would cause a multi-GB allocation.
+          // pe_page_count must be >= 1 and bnum + page_count must
+          // not exceed the number of pages in the swap file.
+          if (page_count < 1 || bnum + page_count > mfp->mf_blocknr_max + 1) {
+            error++;
+            ml_append(lnum++, _("???ILLEGAL BLOCK NUMBER"), (colnr_T)0, true);
+            // Skip this entry and pop back up the stack to keep
+            // recovering whatever else we can.
+            idx = ip->ip_index + 1;
+            bnum = ip->ip_bnum;
+            page_count = 1;
+            buf->b_ml.ml_stack_top--;
+            continue;
+          }
           idx = 0;
           continue;
         }
@@ -1804,6 +1824,7 @@ theend:
 /// On failure an error message is given and IObuff is returned (to avoid
 /// having to check for error everywhere).
 char *ml_get(linenr_T lnum)
+  FUNC_ATTR_NONNULL_RET
 {
   return ml_get_buf_impl(curbuf, lnum, false);
 }
@@ -1813,6 +1834,7 @@ char *ml_get(linenr_T lnum)
 /// This is the same as ml_get(), but taking in the buffer
 /// as an argument.
 char *ml_get_buf(buf_T *buf, linenr_T lnum)
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_NONNULL_RET
 {
   return ml_get_buf_impl(buf, lnum, false);
 }
@@ -1824,6 +1846,7 @@ char *ml_get_buf(buf_T *buf, linenr_T lnum)
 ///
 /// @return a pointer to a line in the buffer
 char *ml_get_buf_mut(buf_T *buf, linenr_T lnum)
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_NONNULL_RET
 {
   return ml_get_buf_impl(buf, lnum, true);
 }
@@ -1850,11 +1873,14 @@ colnr_T ml_get_pos_len(pos_T *pos)
 /// @return  length (excluding the NUL) of the given line in the given buffer.
 colnr_T ml_get_buf_len(buf_T *buf, linenr_T lnum)
 {
-  if (*ml_get_buf(buf, lnum) == NUL) {
+  const char *line = ml_get_buf(buf, lnum);
+
+  if (*line == NUL) {
     return 0;
   }
 
-  return buf->b_ml.ml_line_len - 1;
+  assert(buf->b_ml.ml_line_textlen > 0);
+  return buf->b_ml.ml_line_textlen - 1;
 }
 
 /// @return  codepoint at pos. pos must be either valid or have col set to MAXCOL!
@@ -1872,13 +1898,13 @@ int gchar_pos(pos_T *pos)
 ///
 /// @return  a pointer to a line in a specific buffer
 static char *ml_get_buf_impl(buf_T *buf, linenr_T lnum, bool will_change)
-  FUNC_ATTR_NONNULL_ALL
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_NONNULL_RET
 {
   static int recursive = 0;
   static char questions[4];
 
   if (buf->b_ml.ml_mfp == NULL) {       // there are no lines
-    buf->b_ml.ml_line_len = 1;
+    buf->b_ml.ml_line_textlen = 1;
     return "";
   }
 
@@ -1893,7 +1919,7 @@ static char *ml_get_buf_impl(buf_T *buf, linenr_T lnum, bool will_change)
     ml_flush_line(buf, false);
 errorret:
     STRCPY(questions, "???");
-    buf->b_ml.ml_line_len = 4;
+    buf->b_ml.ml_line_textlen = 4;
     buf->b_ml.ml_line_lnum = lnum;
     return questions;
   }
@@ -1933,7 +1959,7 @@ errorret:
     unsigned end = idx == 0 ? dp->db_txt_end : (dp->db_index[idx - 1] & DB_INDEX_MASK);
 
     buf->b_ml.ml_line_ptr = (char *)dp + start;
-    buf->b_ml.ml_line_len = (colnr_T)(end - start);
+    buf->b_ml.ml_line_textlen = (colnr_T)(end - start);
     buf->b_ml.ml_line_lnum = lnum;
     buf->b_ml.ml_flags &= ~(ML_LINE_DIRTY | ML_ALLOCATED);
   }
@@ -1952,7 +1978,7 @@ errorret:
   if ((buf->b_ml.ml_flags & (ML_LINE_DIRTY | ML_ALLOCATED)) == 0) {
     // make sure the text is in allocated memory
     buf->b_ml.ml_line_ptr = xmemdup(buf->b_ml.ml_line_ptr,
-                                    (size_t)buf->b_ml.ml_line_len);
+                                    (size_t)buf->b_ml.ml_line_textlen);
     buf->b_ml.ml_flags |= ML_ALLOCATED;
     if (will_change) {
       // can't make the change in the data block
@@ -1994,10 +2020,10 @@ static int ml_append_int(buf_T *buf, linenr_T lnum, char *line_arg, colnr_T len_
   if (len == 0) {
     len = (colnr_T)strlen(line) + 1;            // space needed for the text
   }
-  int space_needed = len + (int)INDEX_SIZE;     // space needed for text + index
+  int64_t space_needed = len + (int64_t)INDEX_SIZE;  // space needed for text + index
 
   memfile_T *mfp = buf->b_ml.ml_mfp;
-  int page_size = (int)mfp->mf_page_size;
+  int64_t page_size = mfp->mf_page_size;
 
   // find the data block containing the previous line
   // This also fills the stack with the blocks from the root to the data block
@@ -2027,7 +2053,7 @@ static int ml_append_int(buf_T *buf, linenr_T lnum, char *line_arg, colnr_T len_
   // - appending to the last line in the block
   // - not appending to the last line in the file
   // insert in front of the next block.
-  if ((int)dp->db_free < space_needed && db_idx == line_count - 1
+  if ((int64_t)dp->db_free < space_needed && db_idx == line_count - 1
       && lnum < buf->b_ml.ml_line_count) {
     // Now that the line is not going to be inserted in the block that we
     // expected, the line count has to be adjusted in the pointer blocks
@@ -2051,7 +2077,7 @@ static int ml_append_int(buf_T *buf, linenr_T lnum, char *line_arg, colnr_T len_
   }
   buf->b_ml.ml_line_count++;
 
-  if ((int)dp->db_free >= space_needed) {       // enough room in data block
+  if ((int64_t)dp->db_free >= space_needed) {  // enough room in data block
     // Insert the new line in an existing data block, or in the data block
     // allocated above.
     dp->db_txt_start -= (unsigned)len;
@@ -2129,7 +2155,7 @@ static int ml_append_int(buf_T *buf, linenr_T lnum, char *line_arg, colnr_T len_
         data_moved = (int)(((dp->db_index[db_idx]) & DB_INDEX_MASK) -
                            dp->db_txt_start);
         total_moved = data_moved + lines_moved * (int)INDEX_SIZE;
-        if ((int)dp->db_free + total_moved >= space_needed) {
+        if ((int64_t)dp->db_free + total_moved >= space_needed) {
           in_left = true;               // put new line in left block
           space_needed = total_moved;
         } else {
@@ -2139,7 +2165,7 @@ static int ml_append_int(buf_T *buf, linenr_T lnum, char *line_arg, colnr_T len_
       }
     }
 
-    int page_count = ((space_needed + (int)HEADER_SIZE) + page_size - 1) / page_size;
+    int64_t page_count = ((space_needed + (int64_t)HEADER_SIZE) + page_size - 1) / page_size;
     hp_new = ml_new_data(mfp, flags & ML_APPEND_NEW, page_count);
     if (db_idx < 0) {           // left block is new
       hp_left = hp_new;
@@ -2526,7 +2552,6 @@ int ml_replace_buf_len(buf_T *buf, linenr_T lnum, char *line_arg, size_t len_arg
   FUNC_ATTR_NONNULL_ARG(1)
 {
   char *line = line_arg;
-  colnr_T len = (colnr_T)len_arg;
 
   if (line == NULL) {           // just checking...
     return FAIL;
@@ -2556,7 +2581,7 @@ int ml_replace_buf_len(buf_T *buf, linenr_T lnum, char *line_arg, size_t len_arg
   }
 
   buf->b_ml.ml_line_ptr = line;
-  buf->b_ml.ml_line_len = len + 1;
+  buf->b_ml.ml_line_textlen = (colnr_T)len_arg + 1;
   buf->b_ml.ml_line_lnum = lnum;
   buf->b_ml.ml_flags = (buf->b_ml.ml_flags | ML_LINE_DIRTY) & ~ML_EMPTY;
   if (noalloc) {
@@ -2875,7 +2900,7 @@ static void ml_flush_line(buf_T *buf, bool noalloc)
       } else {  // text of previous line follows
         old_len = (int)(dp->db_index[idx - 1] & DB_INDEX_MASK) - start;
       }
-      colnr_T new_len = buf->b_ml.ml_line_len;
+      colnr_T new_len = buf->b_ml.ml_line_textlen;
       int extra = new_len - old_len;            // negative if lines gets smaller
 
       // if new line fits in data block, replace directly
@@ -2934,7 +2959,7 @@ static void ml_flush_line(buf_T *buf, bool noalloc)
 }
 
 /// create a new, empty, data block
-static bhdr_T *ml_new_data(memfile_T *mfp, bool negative, int page_count)
+static bhdr_T *ml_new_data(memfile_T *mfp, bool negative, int64_t page_count)
 {
   assert(page_count >= 0);
   bhdr_T *hp = mf_new(mfp, negative, (unsigned)page_count);
@@ -3833,7 +3858,7 @@ static void ml_updatechunk(buf_T *buf, linenr_T line, int len, int updtype)
     // First line in empty buffer from ml_flush_line() -- reset
     buf->b_ml.ml_usedchunks = 1;
     buf->b_ml.ml_chunksize[0].mlcs_numlines = 1;
-    buf->b_ml.ml_chunksize[0].mlcs_totalsize = buf->b_ml.ml_line_len;
+    buf->b_ml.ml_chunksize[0].mlcs_totalsize = buf->b_ml.ml_line_textlen;
     return;
   }
 

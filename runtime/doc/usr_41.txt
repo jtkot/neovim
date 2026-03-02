@@ -745,6 +745,7 @@ Blob manipulation:					*blob-functions*
 	reverse()		reverse the order of numbers in a blob
 	index()			index of a value in a Blob
 	indexof()		index in a Blob where an expression is true
+	items()			get List of Blob index-value pairs
 
 Other computation:					*bitwise-function*
 	and()			bitwise AND
@@ -943,8 +944,6 @@ Insert mode completion:				*completion-functions*
 	complete_add()		add to found matches
 	complete_check()	check if completion should be aborted
 	complete_info()		get current completion information
-	complete_match()	get insert completion start match col and
-				trigger text
 	preinserted()		check if text is inserted after cursor
 	pumvisible()		check if the popup menu is displayed
 	pum_getpos()		position and size of popup menu if visible

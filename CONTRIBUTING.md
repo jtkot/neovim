@@ -55,6 +55,7 @@ Developer guidelines
 Pull requests (PRs)
 ---------------------
 
+- Fork the repository first.
 - To avoid duplicate work, create a draft pull request.
 - Your PR must include [test coverage][run-tests].
 - Avoid cosmetic changes to unrelated files in the same commit.
@@ -182,9 +183,11 @@ make lint
 
 - You can format files by using:
   ```bash
-  make format  # or formatc, formatlua
+  make format  # or formatc, formatlua, formatquery
   ```
-  This will format changed Lua and C files with all appropriate flags set.
+  This will format changed C, Lua, and treesitter query files with all
+  appropriate flags set.
+
 - Style rules are (mostly) defined by `src/uncrustify.cfg` which tries to match
   the [style-guide]. To use the Nvim `gq` command with `uncrustify`:
   ```vim
@@ -231,10 +234,10 @@ See [#549][549] for more details.
 
 ### Lua runtime files
 
-Most of the Lua core [`runtime/`](./runtime) modules are precompiled to
-bytecode, so changes to those files won't get used unless you rebuild Nvim or
-by passing `--luamod-dev` and `$VIMRUNTIME`. For example, try adding a function
-to `runtime/lua/vim/_editor.lua` then:
+The Lua [`runtime/lua/vim/_core/`](./runtime/lua/vim/_core/) modules are
+precompiled to bytecode, so changes won't be usable unless you (1) rebuild Nvim
+or (2) start Nvim with `--luamod-dev` and `$VIMRUNTIME`. For example try adding
+a function to `runtime/lua/vim/_core/editor.lua`, then:
 
 ```bash
 VIMRUNTIME=./runtime ./build/bin/nvim --luamod-dev

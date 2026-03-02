@@ -65,6 +65,7 @@
 #include "nvim/msgpack_rpc/channel.h"
 #include "nvim/msgpack_rpc/channel_defs.h"
 #include "nvim/msgpack_rpc/unpacker.h"
+#include "nvim/normal.h"
 #include "nvim/option.h"
 #include "nvim/option_defs.h"
 #include "nvim/option_vars.h"
@@ -131,7 +132,6 @@ DictAs(get_hl_info) nvim_get_hl(Integer ns_id, Dict(get_highlight) *opts, Arena 
 ///       values of the Normal group. If the Normal group has not been defined,
 ///       using these values results in an error.
 ///
-///
 /// @note If `link` is used in combination with other attributes; only the
 ///       `link` will take effect (see |:hi-link|).
 ///
@@ -141,29 +141,35 @@ DictAs(get_hl_info) nvim_get_hl(Integer ns_id, Dict(get_highlight) *opts, Arena 
 ///              |nvim_set_hl_ns()| or |nvim_win_set_hl_ns()| to activate them.
 /// @param name  Highlight group name, e.g. "ErrorMsg"
 /// @param val   Highlight definition map, accepts the following keys:
-///                - fg: color name or "#RRGGBB", see note.
 ///                - bg: color name or "#RRGGBB", see note.
-///                - sp: color name or "#RRGGBB"
+///                - bg_indexed: boolean (default false) If true, bg is a terminal palette index (0-255).
 ///                - blend: integer between 0 and 100
-///                - bold: boolean
-///                - standout: boolean
-///                - underline: boolean
-///                - undercurl: boolean
-///                - underdouble: boolean
-///                - underdotted: boolean
-///                - underdashed: boolean
-///                - strikethrough: boolean
-///                - italic: boolean
-///                - reverse: boolean
-///                - nocombine: boolean
-///                - link: name of another highlight group to link to, see |:hi-link|.
-///                - default: Don't override existing definition |:hi-default|
-///                - ctermfg: Sets foreground of cterm color |ctermfg|
+///                - cterm: cterm attribute map, like |highlight-args|. If not set, cterm attributes
+///                  will match those from the attribute map documented above.
 ///                - ctermbg: Sets background of cterm color |ctermbg|
-///                - cterm: cterm attribute map, like |highlight-args|. If not set,
-///                         cterm attributes will match those from the attribute map
-///                         documented above.
+///                - ctermfg: Sets foreground of cterm color |ctermfg|
+///                - default: boolean Don't override existing definition |:hi-default|
+///                - fg: color name or "#RRGGBB", see note.
+///                - fg_indexed: boolean (default false) If true, fg is a terminal palette index (0-255).
 ///                - force: if true force update the highlight group when it exists.
+///                - link: Name of highlight group to link to. |:hi-link|
+///                - sp: color name or "#RRGGBB"
+///                - altfont: boolean
+///                - blink: boolean
+///                - bold: boolean
+///                - conceal: boolean Concealment at the UI level (terminal SGR), unrelated to |:syn-conceal|.
+///                - dim: boolean
+///                - italic: boolean
+///                - nocombine: boolean
+///                - overline: boolean
+///                - reverse: boolean
+///                - standout: boolean
+///                - strikethrough: boolean
+///                - undercurl: boolean
+///                - underdashed: boolean
+///                - underdotted: boolean
+///                - underdouble: boolean
+///                - underline: boolean
 /// @param[out] err Error details, if any
 ///
 // TODO(bfredl): val should take update vs reset flag
@@ -232,7 +238,7 @@ void nvim_set_hl_ns(Integer ns_id, Error *err)
 
 /// Set active namespace for highlights defined with |nvim_set_hl()| while redrawing.
 ///
-/// This function meant to be called while redrawing, primarily from
+/// This function is meant to be called while redrawing, primarily from
 /// |nvim_set_decoration_provider()| on_win and on_line callbacks, which
 /// are allowed to change the namespace during a redraw cycle.
 ///
@@ -497,6 +503,41 @@ String nvim_replace_termcodes(String str, Boolean from_part, Boolean do_lt, Bool
   return cstr_as_string(ptr);
 }
 
+/// Executes Lua code. Arguments are available as `...` inside the chunk. The chunk can return
+/// a value.
+///
+/// Only statements are executed. To evaluate an expression, prefix it with "return": `return
+/// my_function(...)`
+///
+/// Example:
+/// ```lua
+/// local peer = vim.fn.jobstart({ vim.v.progpath, '--clean', '--embed' }, { rpc=true })
+/// vim.print(vim.rpcrequest(peer, 'nvim_exec_lua', [[
+///       local a, b = ...
+///       return ('result: %s'):format(a + b)
+///     ]],
+///     { 1, 3 }
+///   )
+/// )
+/// ```
+///
+/// @param code       Lua code to execute.
+/// @param args       Arguments to the Lua code.
+/// @param[out] err   Lua error raised while parsing or executing the Lua code.
+///
+/// @return           Value returned by the Lua code (if any), or NIL.
+Object nvim_exec_lua(String code, Array args, Arena *arena, Error *err)
+  FUNC_API_SINCE(7)
+  FUNC_API_REMOTE_ONLY
+{
+  // TODO(bfredl): convert directly from msgpack to lua and then back again
+  return nlua_exec(code, NULL, args, kRetObject, arena, err);
+}
+
+/// EXPERIMENTAL: this API may change or be removed in the future.
+///
+/// Like |nvim_exec_lua()|, but can be called during |api-fast| contexts.
+///
 /// Execute Lua code. Parameters (if any) are available as `...` inside the
 /// chunk. The chunk can return a value.
 ///
@@ -509,12 +550,12 @@ String nvim_replace_termcodes(String str, Boolean from_part, Boolean do_lt, Bool
 ///                   or executing the Lua code.
 ///
 /// @return           Return value of Lua code if present or NIL.
-Object nvim_exec_lua(String code, Array args, Arena *arena, Error *err)
-  FUNC_API_SINCE(7)
+Object nvim__exec_lua_fast(String code, Array args, Arena *arena, Error *err)
+  FUNC_API_SINCE(14)
   FUNC_API_REMOTE_ONLY
+  FUNC_API_FAST
 {
-  // TODO(bfredl): convert directly from msgpack to lua and then back again
-  return nlua_exec(code, NULL, args, kRetObject, arena, err);
+  return nvim_exec_lua(code, args, arena, err);
 }
 
 /// Calculates the number of display cells occupied by `text`.
@@ -940,6 +981,9 @@ void nvim_set_current_win(Window window, Error *err)
   }
 
   TRY_WRAP(err, {
+    if (win->w_buffer != curbuf) {
+      reset_VIsual_and_resel();
+    }
     goto_tabpage_win(win_find_tabpage(win), win);
   });
 }
@@ -1062,7 +1106,7 @@ Integer nvim_open_term(Buffer buffer, Dict(open_term) *opts, Error *err)
   FUNC_API_SINCE(7)
   FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
-  buf_T *buf = find_buffer_by_handle(buffer, err);
+  buf_T *buf = api_buf_ensure_loaded(buffer, err);
   if (!buf) {
     return 0;
   }
@@ -1070,6 +1114,17 @@ Integer nvim_open_term(Buffer buffer, Dict(open_term) *opts, Error *err)
   if (buf == cmdwin_buf) {
     api_set_error(err, kErrorTypeException, "%s", e_cmdwin);
     return 0;
+  }
+
+  bool may_read_buffer = true;
+  if (buf->terminal) {
+    if (terminal_running(buf->terminal)) {
+      api_set_error(err, kErrorTypeException,
+                    "Terminal already connected to buffer %d", buf->handle);
+      return 0;
+    }
+    buf_close_terminal(buf);
+    may_read_buffer = false;
   }
 
   LuaRef cb = LUA_NOREF;
@@ -1089,16 +1144,20 @@ Integer nvim_open_term(Buffer buffer, Dict(open_term) *opts, Error *err)
     .height = (uint16_t)curwin->w_view_height,
     .write_cb = term_write,
     .resize_cb = term_resize,
+    .resume_cb = term_resume,
     .close_cb = term_close,
     .force_crlf = GET_BOOL_OR_TRUE(opts, open_term, force_crlf),
   };
 
   // Read existing buffer contents (if any)
   StringBuilder contents = KV_INITIAL_VALUE;
-  read_buffer_into(buf, 1, buf->b_ml.ml_line_count, &contents);
+  if (may_read_buffer) {
+    read_buffer_into(buf, 1, buf->b_ml.ml_line_count, &contents);
+  }
 
   channel_incref(chan);
-  terminal_open(&chan->term, buf, topts);
+  chan->term = terminal_alloc(buf, topts);
+  terminal_open(&chan->term, buf);
   if (chan->term != NULL) {
     terminal_check_size(chan->term);
   }
@@ -1134,6 +1193,10 @@ static void term_write(const char *buf, size_t size, void *data)
 static void term_resize(uint16_t width, uint16_t height, void *data)
 {
   // TODO(bfredl): Lua callback
+}
+
+static void term_resume(void *data)
+{
 }
 
 static void term_close(void *data)

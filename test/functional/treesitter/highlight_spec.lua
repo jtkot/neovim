@@ -1443,7 +1443,7 @@ end)
 
 it('no nil index for missing highlight query', function()
   clear()
-  local cqueries = vim.uv.cwd() .. '/runtime/queries/c/'
+  local cqueries = t.paths.test_source_path .. '/runtime/queries/c/'
   os.rename(cqueries .. 'highlights.scm', cqueries .. '_highlights.scm')
   finally(function()
     os.rename(cqueries .. '_highlights.scm', cqueries .. 'highlights.scm')
@@ -1452,4 +1452,24 @@ it('no nil index for missing highlight query', function()
     local parser = vim.treesitter.get_parser(0, 'c')
     vim.treesitter.highlighter.new(parser)
   ]])
+end)
+
+it('spell navigation correctly wraps back to the first line (Row 0) #36970', function()
+  clear()
+  insert([[
+mispelledone
+mispelledtwo]])
+
+  command('set spell')
+  command('set wrapscan')
+  exec_lua(function()
+    vim.treesitter.start(0, 'markdown')
+  end)
+
+  api.nvim_win_set_cursor(0, { 2, 0 })
+
+  feed(']s')
+
+  local pos = api.nvim_win_get_cursor(0)
+  eq(1, pos[1], 'Should have wrapped back to Line 1')
 end)

@@ -198,6 +198,7 @@ static struct vimvar {
   VV(VV_EVENT,            "event",            VAR_DICT, VV_RO),
   VV(VV_VERSIONLONG,      "versionlong",      VAR_NUMBER, VV_RO),
   VV(VV_ECHOSPACE,        "echospace",        VAR_NUMBER, VV_RO),
+  VV(VV_ARGF,             "argf",             VAR_LIST, VV_RO),
   VV(VV_ARGV,             "argv",             VAR_LIST, VV_RO),
   VV(VV_COLLATE,          "collate",          VAR_STRING, VV_RO),
   VV(VV_EXITING,          "exiting",          VAR_NUMBER, VV_RO),
@@ -281,8 +282,9 @@ void evalvars_init(void)
       hash_add(&compat_hashtab, p->vv_di.di_key);
     }
   }
-  set_vim_var_nr(VV_VERSION, VIM_VERSION_100);
-  set_vim_var_nr(VV_VERSIONLONG, VIM_VERSION_100 * 10000 + highest_patch());
+  const int vim_version = min_vim_version();
+  set_vim_var_nr(VV_VERSION, vim_version);
+  set_vim_var_nr(VV_VERSIONLONG, vim_version * 10000 + highest_patch());
 
   dict_T *const msgpack_types_dict = tv_dict_alloc();
   for (size_t i = 0; i < ARRAY_SIZE(msgpack_type_names); i++) {
@@ -914,9 +916,6 @@ void ex_let(exarg_T *eap)
   argend = skip_var_list(arg, &var_count, &semicolon, false);
   if (argend == NULL) {
     return;
-  }
-  if (argend > arg && argend[-1] == '.') {  // For var.='str'.
-    argend--;
   }
   expr = skipwhite(argend);
   bool concat = strncmp(expr, "..=", 3) == 0;
@@ -2486,7 +2485,6 @@ dictitem_T *find_var_in_ht(hashtab_T *const ht, int htname, const char *const va
 static hashtab_T *find_var_ht_dict(const char *name, const size_t name_len, const char **varname,
                                    dict_T **d)
 {
-  funccall_T *funccal = get_funccal();
   *d = NULL;
 
   if (name_len == 0) {
@@ -2506,11 +2504,12 @@ static hashtab_T *find_var_ht_dict(const char *name, const size_t name_len, cons
       return &compat_hashtab;
     }
 
-    if (funccal == NULL) {  // global variable
-      *d = get_globvar_dict();
-    } else {  // l: variable
-      *d = &funccal->fc_l_vars;
+    *d = get_funccal_local_dict();
+    if (*d != NULL) {  // local variable
+      goto end;
     }
+
+    *d = get_globvar_dict();  // global variable
     goto end;
   }
 
@@ -2532,10 +2531,10 @@ static hashtab_T *find_var_ht_dict(const char *name, const size_t name_len, cons
     *d = curtab->tp_vars;
   } else if (*name == 'v') {  // v: variable
     *d = get_vimvar_dict();
-  } else if (*name == 'a' && funccal != NULL) {  // function argument
-    *d = &funccal->fc_l_avars;
-  } else if (*name == 'l' && funccal != NULL) {  // local variable
-    *d = &funccal->fc_l_vars;
+  } else if (*name == 'a') {  // a: function argument
+    *d = get_funccal_args_dict();
+  } else if (*name == 'l') {  // l: local variable
+    *d = get_funccal_local_dict();
   } else if (*name == 's'  // script variable
              && (current_sctx.sc_sid > 0 || current_sctx.sc_sid == SID_STR
                  || current_sctx.sc_sid == SID_LUA)
@@ -2937,9 +2936,9 @@ bool var_check_ro(const int flags, const char *name, size_t name_len)
 {
   const char *error_message = NULL;
   if (flags & DI_FLAGS_RO) {
-    error_message = _(e_readonlyvar);
+    error_message = N_(e_cannot_change_readonly_variable_str);
   } else if ((flags & DI_FLAGS_RO_SBX) && sandbox) {
-    error_message = N_("E794: Cannot set variable in the sandbox: \"%.*s\"");
+    error_message = N_(e_cannot_set_variable_in_sandbox_str);
   }
 
   if (error_message == NULL) {
@@ -2972,7 +2971,7 @@ bool var_check_lock(const int flags, const char *name, size_t name_len)
     name_len = strlen(name);
   }
 
-  semsg(_("E1122: Variable is locked: %*s"), (int)name_len, name);
+  semsg(_("E1122: Variable is locked: %.*s"), (int)name_len, name);
 
   return true;
 }
@@ -3005,7 +3004,7 @@ bool var_check_fixed(const int flags, const char *name, size_t name_len)
     } else if (name_len == TV_CSTRING) {
       name_len = strlen(name);
     }
-    semsg(_("E795: Cannot delete variable %.*s"), (int)name_len, name);
+    semsg(_(e_cannot_delete_variable_str), (int)name_len, name);
     return true;
   }
   return false;

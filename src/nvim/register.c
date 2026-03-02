@@ -23,6 +23,7 @@
 #include "nvim/getchar.h"
 #include "nvim/globals.h"
 #include "nvim/indent.h"
+#include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/mark.h"
 #include "nvim/mbyte.h"
@@ -570,9 +571,9 @@ static void put_reedit_in_typebuf(int silent)
 ///          processed next is returned in idx.
 static char *execreg_line_continuation(String *lines, size_t *idx)
 {
-  size_t i = *idx;
-  assert(i > 0);
-  const size_t cmd_end = i;
+  size_t cmd_start = *idx;
+  assert(cmd_start > 0);
+  const size_t cmd_end = cmd_start;
 
   garray_T ga;
   ga_init(&ga, (int)sizeof(char), 400);
@@ -580,32 +581,34 @@ static char *execreg_line_continuation(String *lines, size_t *idx)
   // search backwards to find the first line of this command.
   // Any line not starting with \ or "\ is the start of the
   // command.
-  while (--i > 0) {
-    char *p = skipwhite(lines[i].data);
+  while (--cmd_start > 0) {
+    char *p = skipwhite(lines[cmd_start].data);
     if (*p != '\\' && (p[0] != '"' || p[1] != '\\' || p[2] != ' ')) {
       break;
     }
   }
-  const size_t cmd_start = i;
 
   // join all the lines
-  ga_concat(&ga, lines[cmd_start].data);
+  String *tmp = &lines[cmd_start];
+  ga_concat_len(&ga, tmp->data, tmp->size);
   for (size_t j = cmd_start + 1; j <= cmd_end; j++) {
-    char *p = skipwhite(lines[j].data);
+    tmp = &lines[j];
+    char *p = skipwhite(tmp->data);
     if (*p == '\\') {
       // Adjust the growsize to the current length to
       // speed up concatenating many lines.
       if (ga.ga_len > 400) {
         ga_set_growsize(&ga, MIN(ga.ga_len, 8000));
       }
-      ga_concat(&ga, p + 1);
+      p++;
+      ga_concat_len(&ga, p, (size_t)(tmp->data + tmp->size - p));
     }
   }
   ga_append(&ga, NUL);
   char *str = xmemdupz(ga.ga_data, (size_t)ga.ga_len);
   ga_clear(&ga);
 
-  *idx = i;
+  *idx = cmd_start;
   return str;
 }
 
@@ -1212,7 +1215,7 @@ void do_autocmd_textyankpost(oparg_T *oap, yankreg_T *reg)
   // The yanked text contents.
   list_T *const list = tv_list_alloc((ptrdiff_t)reg->y_size);
   for (size_t i = 0; i < reg->y_size; i++) {
-    tv_list_append_string(list, reg->y_array[i].data, -1);
+    tv_list_append_string(list, reg->y_array[i].data, (int)reg->y_array[i].size);
   }
   tv_list_set_lock(list, VAR_FIXED);
   tv_dict_add_list(dict, S_LEN("regcontents"), list);
@@ -1298,6 +1301,11 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
   const pos_T orig_start = curbuf->b_op_start;
   const pos_T orig_end = curbuf->b_op_end;
   unsigned cur_ve_flags = get_ve_flags(curwin);
+
+  // Remove any preinserted text (issue vim/vim#19329)
+  if (ins_compl_preinsert_effect()) {
+    ins_compl_delete(false);
+  }
 
   curbuf->b_op_start = curwin->w_cursor;        // default for '[ mark
   curbuf->b_op_end = curwin->w_cursor;          // default for '] mark
@@ -1841,7 +1849,7 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
           if (lnum == curwin->w_cursor.lnum) {
             // make sure curwin->w_virtcol is updated
             changed_cline_bef_curs(curwin);
-            invalidate_botline(curwin);
+            invalidate_botline_win(curwin);
             curwin->w_cursor.col += (colnr_T)(totlen - 1);
           }
           changed_bytes(lnum, col);
@@ -2336,7 +2344,7 @@ void *get_reg_contents(int regname, int flags)
   if (flags & kGRegList) {
     list_T *const list = tv_list_alloc((ptrdiff_t)reg->y_size);
     for (size_t i = 0; i < reg->y_size; i++) {
-      tv_list_append_string(list, reg->y_array[i].data, -1);
+      tv_list_append_string(list, reg->y_array[i].data, (int)reg->y_array[i].size);
     }
 
     return list;

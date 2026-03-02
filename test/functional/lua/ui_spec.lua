@@ -109,7 +109,7 @@ describe('vim.ui', function()
       eq(true, exec_lua('return (nil == result)'))
     end)
 
-    it('can return opts.cacelreturn when aborted with ESC with cancelreturn opt #18144', function()
+    it('can return opts.cancelreturn when aborted with ESC with cancelreturn opt #18144', function()
       feed(':lua result = "on_confirm not called"<cr>')
       feed(':lua vim.ui.input({ cancelreturn = "CANCEL" }, function(input) result = input end)<cr>')
       feed('Inputted Text<esc>')
@@ -143,9 +143,14 @@ describe('vim.ui', function()
         exec_lua [[vim.system = function() return { wait=function() return { code=3 } end } end]]
       end
       if not is_os('bsd') then
-        local rv =
-          exec_lua [[local cmd = vim.ui.open('non-existent-file'); return cmd:wait(100).code]]
-        ok(type(rv) == 'number' and rv ~= 0, 'nonzero exit code', rv)
+        local rv = exec_lua([[
+          local cmd, err = vim.ui.open('non-existent-file')
+          if err then return nil end
+          return cmd:wait(100).code
+        ]])
+        if type(rv) == 'number' then
+          ok(rv ~= 0, 'nonzero exit code', rv)
+        end
       end
 
       exec_lua [[
