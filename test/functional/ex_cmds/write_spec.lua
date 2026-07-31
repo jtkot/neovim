@@ -1,6 +1,8 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, after_each, pending =
+  t.describe, t.it, t.before_each, t.after_each, t.pending
 local eq, eval, clear, write_file, source, insert =
   t.eq, n.eval, n.clear, t.write_file, n.source, n.insert
 local pcall_err = t.pcall_err
@@ -10,7 +12,6 @@ local fn = n.fn
 local api = n.api
 local skip = t.skip
 local is_os = t.is_os
-local is_ci = t.is_ci
 local read_file = t.read_file
 
 local fname = 'Xtest-functional-ex_cmds-write'
@@ -56,7 +57,6 @@ describe(':write', function()
   end)
 
   it('&backupcopy=no replaces symlink with new file', function()
-    skip(is_ci('cirrus'))
     command('set backupcopy=no')
     write_file('Xtest_bkc_file.txt', 'content0')
     if is_os('win') then
@@ -79,7 +79,7 @@ describe(':write', function()
   it('appends FIFO file', function()
     -- mkfifo creates read-only .lnk files on Windows
     if is_os('win') or eval("executable('mkfifo')") == 0 then
-      pending('missing "mkfifo" command')
+      pending('N/A: missing "mkfifo" command')
     end
 
     local text = 'some fifo text from write_spec'
@@ -124,31 +124,35 @@ describe(':write', function()
     eq(1, eval("filereadable('Xtest_write/write2/p_opt.txt')"))
     eq(1, eval("filereadable('Xtest_write/write2/p_opt2.txt')"))
     eq(0, eval("filereadable('Xtest_write/write3/p_opt3.txt')"))
+    t.matches(
+      'E474: Invalid argument',
+      pcall_err(command, 'read ++edits Xtest_write/write/p_opt.txt')
+    )
 
     eq('Vim(write):E32: No file name', pcall_err(command, 'write ++p Xotherdir/'))
-    if not is_os('win') then
-      eq(
-        ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
-        pcall_err(command, 'write ++p .')
-      )
-      eq(
-        ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
-        pcall_err(command, 'write ++p ./')
-      )
-    end
+    eq(
+      ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
+      pcall_err(command, 'write ++p .')
+    )
+    eq(
+      ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
+      pcall_err(command, 'write ++p ./')
+    )
+
+    t.matches(
+      'E474: Invalid argument',
+      pcall_err(command, 'write ++patate Xtest_write/garbage.txt')
+    )
   end)
 
   it('errors out correctly', function()
-    skip(is_ci('cirrus'))
     command('let $HOME=""')
     eq(fn.fnamemodify('.', ':p:h'), fn.fnamemodify('.', ':p:h:~'))
     -- Message from check_overwrite
-    if not is_os('win') then
-      eq(
-        ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
-        pcall_err(command, 'write .')
-      )
-    end
+    eq(
+      ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
+      pcall_err(command, 'write .')
+    )
     api.nvim_set_option_value('writeany', true, {})
     -- Message from buf_write
     eq('Vim(write):E502: "." is a directory', pcall_err(command, 'write .'))
@@ -173,7 +177,7 @@ describe(':write', function()
       eq(true, os.remove(fname_bak))
     end
     write_file(fname_bak, 'TTYX')
-    skip(is_os('win'), [[FIXME: exc_exec('write!') outputs 0 in Windows]])
+    skip(is_os('win'), [[FIXME: pcall_err(command, 'write!') outputs 0 in Windows]])
     vim.uv.fs_symlink(fname_bak .. ('/xxxxx'):rep(20), fname)
     eq("Vim(write):E166: Can't open linked file for writing", pcall_err(command, 'write!'))
   end)

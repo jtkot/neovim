@@ -1,5 +1,7 @@
 local n = require('test.functional.testnvim')()
+local t = require('test.testutil')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local api = n.api
 local assert_alive = n.assert_alive
 local clear = n.clear
@@ -26,7 +28,7 @@ describe(':terminal', function()
     api.nvim_chan_send(chan, input)
     --- @type string
     local term_title = api.nvim_buf_get_var(0, 'term_title')
-    assert.Equal(term_title, 'This title set with OSC 2')
+    t.eq(term_title, 'This title set with OSC 2')
     assert_alive()
   end)
 
@@ -38,7 +40,7 @@ describe(':terminal', function()
     api.nvim_chan_send(chan, input)
     --- @type string
     local term_title = api.nvim_buf_get_var(0, 'term_title')
-    assert.Equal(term_title, 'This title set with OSC 0')
+    t.eq(term_title, 'This title set with OSC 0')
     assert_alive()
   end)
 
@@ -67,8 +69,8 @@ describe(':terminal', function()
     local chan = api.nvim_open_term(0, {})
     exec_lua([[
       vim.api.nvim_create_autocmd("TermRequest", {
-        callback = function(args)
-          _G.osc10_response = {sequence = args.data.sequence, terminator = args.data.terminator }
+        callback = function(ev)
+          _G.osc10_response = {sequence = ev.data.sequence, terminator = ev.data.terminator }
         end
       })
     ]])
@@ -80,16 +82,29 @@ describe(':terminal', function()
 
     send_osc_with_terminator(BEL)
     --- @type string
-    assert.same(
+    t.eq(
       { sequence = OSC_PREFIX .. '10;?', terminator = BEL },
       exec_lua([[return _G.osc10_response]])
     )
 
     send_osc_with_terminator(ST)
     --- @type string
-    assert.same(
+    t.eq(
       { sequence = OSC_PREFIX .. '10;?', terminator = ST },
       exec_lua([[return _G.osc10_response]])
     )
+  end)
+
+  it('does not leak pending TermRequest on buffer destroy #39332', function()
+    -- Send all OSC sequences in one exec_lua so that the event loop does not drain between the sends.
+    exec_lua(function(prefix, st)
+      local buf = vim.api.nvim_create_buf(false, true)
+      local chan = vim.api.nvim_open_term(buf, {})
+      vim.api.nvim_create_autocmd('TermRequest', { buffer = buf, callback = function() end })
+      vim.api.nvim_chan_send(chan, prefix .. '7;file:///a' .. st)
+      vim.api.nvim_chan_send(chan, prefix .. '7;file:///b' .. st)
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end, OSC_PREFIX, ST)
+    assert_alive()
   end)
 end)

@@ -23,10 +23,11 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/buffer_updates.h"
 #include "nvim/change.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
+#include "nvim/dialog.h"
 #include "nvim/diff.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/vars.h"
@@ -36,11 +37,12 @@
 #include "nvim/fold.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/iconv_defs.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/log.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mbyte.h"
@@ -84,6 +86,10 @@
 # include <sys/file.h>
 #endif
 
+#ifdef MSWIN
+# include "nvim/os/os_win_console.h"
+#endif
+
 #ifdef OPEN_CHR_FILES
 # include "nvim/charset.h"
 #endif
@@ -96,6 +102,10 @@
 #include "fileio.c.generated.h"
 
 static const char *e_auchangedbuf = N_("E812: Autocommands changed buffer or buffer name");
+
+// Bitmask with 0x80 set in each byte of a uint64_t word, used to detect
+// non-ASCII bytes (high bit set) in multiple bytes at once.
+#define NONASCII_MASK (((uint64_t)(-1) / 0xFF) * 0x80)
 
 void filemess(buf_T *buf, char *name, char *s)
 {
@@ -114,7 +124,7 @@ void filemess(buf_T *buf, char *name, char *s)
   // For further ones overwrite the previous one, reset msg_scroll before
   // calling filemess().
   int msg_scroll_save = msg_scroll;
-  if (shortmess(SHM_OVERALL) && !msg_listdo_overwrite && !exiting && p_verbose == 0) {
+  if (shortmess(kShmOverall) && !msg_listdo_overwrite && !exiting && p_verbose == 0) {
     msg_scroll = false;
   }
   if (!msg_scroll) {    // wait a bit when overwriting an error msg
@@ -127,9 +137,15 @@ void filemess(buf_T *buf, char *name, char *s)
   msg_scroll = msg_scroll_save;
   msg_scrolled_ign = true;
   // may truncate the message to avoid a hit-return prompt
-  msg_outtrans(msg_may_trunc(false, IObuff), 0, false);
+  if (*s == NUL) {
+    // Append the filename (without trailing char) to the message ID.
+    char msg_id[IOSIZE + 14] = "nvim.bufwrite ";
+    xstrlcat(msg_id, IObuff, 14 + strlen(IObuff));
+    msg_progress(IObuff, msg_id, "running", 0, false, true);
+  } else {
+    msg_outtrans(msg_may_trunc(false, IObuff), 0, false);
+  }
   msg_clr_eos();
-  ui_flush();
   msg_scrolled_ign = false;
 }
 
@@ -244,7 +260,7 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
   if (curbuf->b_ffname == NULL
       && !filtering
       && fname != NULL
-      && vim_strchr(p_cpo, CPO_FNAMER) != NULL
+      && vim_strchr(p_cpo, kCpoFnamer) != NULL
       && !(flags & READ_DUMMY)) {
     if (set_rw_fname(fname, sfname) == FAIL) {
       goto theend;
@@ -261,10 +277,6 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
   using_b_ffname = (fname == curbuf->b_ffname) || (sfname == curbuf->b_ffname);
   using_b_fname = (fname == curbuf->b_fname) || (sfname == curbuf->b_fname);
 
-  // After reading a file the cursor line changes but we don't want to
-  // display the line.
-  ex_no_reprint = true;
-
   // don't display the file info for another buffer now
   need_fileinfo = false;
 
@@ -275,7 +287,7 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
   if (sfname == NULL) {
     sfname = fname;
   }
-#if defined(UNIX)
+#ifdef UNIX
   fname = sfname;
 #endif
 
@@ -301,6 +313,12 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
         // consider this to work like ":edit", thus reset the
         // BF_NOTEDITED flag.  Then ":write" will work to overwrite the
         // same file.
+        if (retval == OK && !curbuf->b_au_did_filetype && *curbuf->b_p_ft != NUL) {
+          apply_autocmds(EVENT_FILETYPE, curbuf->b_p_ft, curbuf->b_fname, true, curbuf);
+          if (aborting()) {
+            retval = FAIL;
+          }
+        }
         if (retval == OK) {
           curbuf->b_flags &= ~BF_NOTEDITED;
         }
@@ -322,7 +340,7 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
     }
   }
 
-  if (((shortmess(SHM_OVER) && !msg_listdo_overwrite) || curbuf->b_help) && p_verbose == 0) {
+  if (((shortmess(kShmOver) && !msg_listdo_overwrite) || curbuf->b_help) && p_verbose == 0) {
     msg_scroll = false;         // overwrite previous file message
   } else {
     msg_scroll = true;          // don't overwrite previous file message
@@ -1333,9 +1351,24 @@ retry:
         bool incomplete_tail = false;
 
         // Reading UTF-8: Check if the bytes are valid UTF-8.
-        for (p = (uint8_t *)ptr;; p++) {
-          int todo = (int)(((uint8_t *)ptr + size) - p);
+        for (p = (uint8_t *)ptr;;) {
+          // Skip ASCII bytes quickly using word-at-a-time check.
+          {
+            uint8_t *ascii_end = (uint8_t *)ptr + size;
+            while (ascii_end - p >= (ptrdiff_t)sizeof(uint64_t)) {
+              uint64_t word;
+              memcpy(&word, p, sizeof(uint64_t));
+              if (word & NONASCII_MASK) {
+                break;
+              }
+              p += sizeof(uint64_t);
+            }
+            while (p < ascii_end && *p < 0x80) {
+              p++;
+            }
+          }
 
+          int todo = (int)(((uint8_t *)ptr + size) - p);
           if (todo <= 0) {
             break;
           }
@@ -1384,13 +1417,15 @@ retry:
               // Drop, keep or replace the bad byte.
               if (bad_char_behavior == BAD_DROP) {
                 memmove(p, p + 1, (size_t)(todo - 1));
-                p--;
                 size--;
-              } else if (bad_char_behavior != BAD_KEEP) {
-                *p = (uint8_t)bad_char_behavior;
+              } else {
+                if (bad_char_behavior != BAD_KEEP) {
+                  *p = (uint8_t)bad_char_behavior;
+                }
+                p++;
               }
             } else {
-              p += l - 1;
+              p += l;
             }
           }
         }
@@ -1515,60 +1550,83 @@ rewind_retry:
         }
       }
     } else {
-      ptr--;
-      while (++ptr, --size >= 0) {
-        if ((c = *ptr) != NUL && c != NL) {        // catch most common case
-          continue;
-        }
-        if (c == NUL) {
-          *ptr = NL;            // NULs are replaced by newlines!
-        } else {
-          if (skip_count == 0) {
-            *ptr = NUL;                         // end of line
-            len = (colnr_T)(ptr - line_start + 1);
-            if (fileformat == EOL_DOS) {
-              if (ptr > line_start && ptr[-1] == CAR) {
-                // remove CR before NL
-                ptr[-1] = NUL;
-                len--;
-              } else if (ff_error != EOL_DOS) {
-                // Reading in Dos format, but no CR-LF found!
-                // When 'fileformats' includes "unix", delete all
-                // the lines read so far and start all over again.
-                // Otherwise give an error message later.
-                if (try_unix
-                    && !read_stdin
-                    && (read_buffer || vim_lseek(fd, 0, SEEK_SET) == 0)) {
-                  fileformat = EOL_UNIX;
-                  if (set_options) {
-                    set_fileformat(EOL_UNIX, OPT_LOCAL);
-                  }
-                  file_rewind = true;
-                  keep_fileformat = true;
-                  goto retry;
-                }
-                ff_error = EOL_DOS;
-              }
-            }
-            if (ml_append(lnum, line_start, len, newfile) == FAIL) {
-              error = true;
-              break;
-            }
-            if (read_undo_file) {
-              sha256_update(&sha_ctx, (uint8_t *)line_start, (size_t)len);
-            }
-            lnum++;
-            if (--read_count == 0) {
-              error = true;                         // break loop
-              line_start = ptr;                 // nothing left to write
-              break;
-            }
-          } else {
-            skip_count--;
+      // Use memchr() for SIMD-optimized newline scanning instead
+      // of scanning each byte individually.
+      char *end = ptr + size;
+
+      while (ptr < end) {
+        char *nl = memchr(ptr, NL, (size_t)(end - ptr));
+        char *nul_scan;
+
+        if (nl == NULL) {
+          // No more newlines in buffer.
+          // Replace any NUL bytes with NL in remaining data.
+          while ((nul_scan = memchr(ptr, NUL, (size_t)(end - ptr))) != NULL) {
+            *nul_scan = NL;
+            ptr = nul_scan + 1;
           }
-          line_start = ptr + 1;
+          ptr = end;
+          break;
         }
+
+        // Replace NUL bytes with NL before the newline.
+        {
+          char *scan = ptr;
+          while ((nul_scan = memchr(scan, NUL, (size_t)(nl - scan))) != NULL) {
+            *nul_scan = NL;
+            scan = nul_scan + 1;
+          }
+        }
+
+        // Process the newline.
+        ptr = nl;
+        if (skip_count == 0) {
+          *ptr = NUL;                         // end of line
+          len = (colnr_T)(ptr - line_start + 1);
+          if (fileformat == EOL_DOS) {
+            if (ptr > line_start && ptr[-1] == CAR) {
+              // remove CR before NL
+              ptr[-1] = NUL;
+              len--;
+            } else if (ff_error != EOL_DOS) {
+              // Reading in Dos format, but no CR-LF found!
+              // When 'fileformats' includes "unix", delete all
+              // the lines read so far and start all over again.
+              // Otherwise give an error message later.
+              if (try_unix
+                  && !read_stdin
+                  && (read_buffer || vim_lseek(fd, 0, SEEK_SET) == 0)) {
+                fileformat = EOL_UNIX;
+                if (set_options) {
+                  set_fileformat(EOL_UNIX, OPT_LOCAL);
+                }
+                file_rewind = true;
+                keep_fileformat = true;
+                goto retry;
+              }
+              ff_error = EOL_DOS;
+            }
+          }
+          if (ml_append(lnum, line_start, len, newfile) == FAIL) {
+            error = true;
+            break;
+          }
+          if (read_undo_file) {
+            sha256_update(&sha_ctx, (uint8_t *)line_start, (size_t)len);
+          }
+          lnum++;
+          if (--read_count == 0) {
+            error = true;                         // break loop
+            line_start = ptr;                 // nothing left to write
+            break;
+          }
+        } else {
+          skip_count--;
+        }
+        line_start = ptr + 1;
+        ptr++;
       }
+      size = -1;
     }
     linerest = (ptr - line_start);
     os_breakcheck();
@@ -1623,7 +1681,7 @@ failed:
     save_file_ff(curbuf);
     // If editing a new file: set 'fenc' for the current buffer.
     // Also for ":read ++edit file".
-    set_option_direct(kOptFileencoding, CSTR_AS_OPTVAL(fenc), OPT_LOCAL, 0);
+    set_option_direct(kOptFileencoding, CSTR_AS_OBJ(fenc), OPT_LOCAL, 0);
   }
   if (fenc_alloced) {
     xfree(fenc);
@@ -1646,11 +1704,8 @@ failed:
       // On Unix, use stderr for stdin, makes shell commands work.
       vim_ignored = dup(2);
 #else
-      // On Windows, use the console input handle for stdin.
-      HANDLE conin = CreateFile("CONIN$", GENERIC_READ | GENERIC_WRITE,
-                                FILE_SHARE_READ, (LPSECURITY_ATTRIBUTES)NULL,
-                                OPEN_EXISTING, 0, (HANDLE)NULL);
-      vim_ignored = _open_osfhandle((intptr_t)conin, _O_RDONLY);
+      // On Windows, use the console input handle (CONIN$) for stdin.
+      vim_ignored = os_open_conin_fd();
 #endif
     }
   }
@@ -1724,7 +1779,7 @@ failed:
 #endif
       if (curbuf->b_p_ro) {
         buflen += snprintf(IObuff + buflen, (size_t)(IOSIZE - buflen), "%s",
-                           shortmess(SHM_RO) ? _("[RO]") : _("[readonly]"));
+                           shortmess(kShmRo) ? _("[RO]") : _("[readonly]"));
         c = true;
       }
       if (read_no_eol_lnum) {
@@ -1796,13 +1851,8 @@ failed:
 
     u_clearline(curbuf);   // cannot use "U" command after adding lines
 
-    // In Ex mode: cursor at last new line.
-    // Otherwise: cursor at first new line.
-    if (exmode_active) {
-      curwin->w_cursor.lnum = from + linecnt;
-    } else {
-      curwin->w_cursor.lnum = from + 1;
-    }
+    // Cursor at first new line.
+    curwin->w_cursor.lnum = from + 1;
     check_cursor_lnum(curwin);
     beginline(BL_WHITE | BL_FIX);           // on first non-blank
 
@@ -1973,7 +2023,7 @@ void set_forced_fenc(exarg_T *eap)
   }
 
   char *fenc = enc_canonize(eap->cmd + eap->force_enc);
-  set_option_direct(kOptFileencoding, CSTR_AS_OPTVAL(fenc), OPT_LOCAL, 0);
+  set_option_direct(kOptFileencoding, CSTR_AS_OBJ(fenc), OPT_LOCAL, 0);
   xfree(fenc);
 }
 
@@ -2104,19 +2154,20 @@ int set_rw_fname(char *fname, char *sfname)
 /// Replaces home directory at the start with `~`.
 ///
 /// @param[out]  ret_buf  Buffer to save results to.
-/// @param[in]  buf_len  ret_buf length.
+/// @param[in]  bufsize  ret_buf size.
 /// @param[in]  buf  buf_T file name is coming from.
 /// @param[in]  fname  File name to write.
-void add_quoted_fname(char *const ret_buf, const size_t buf_len, const buf_T *const buf,
+void add_quoted_fname(char *const ret_buf, const size_t bufsize, const buf_T *const buf,
                       const char *fname)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   if (fname == NULL) {
     fname = "-stdin-";
   }
-  ret_buf[0] = '"';
-  home_replace(buf, fname, ret_buf + 1, buf_len - 4, true);
-  xstrlcat(ret_buf, "\" ", buf_len);
+  size_t len = 0;
+  ret_buf[len++] = '"';
+  len += home_replace(buf, fname, ret_buf + len, bufsize - 4, true);
+  xstrlcpy(ret_buf + len, "\" ", bufsize - len);
 }
 
 /// Append message for text mode to IObuff.
@@ -2150,7 +2201,7 @@ void msg_add_lines(int insert_space, linenr_T lnum, off_T nchars)
 {
   size_t len = strlen(IObuff);
 
-  if (shortmess(SHM_LINES)) {
+  if (shortmess(kShmLines)) {
     snprintf(IObuff + len, IOSIZE - len,
              _("%s%" PRId64 "L, %" PRId64 "B"),  // l10n: L as in line, B as in byte
              insert_space ? " " : "", (int64_t)lnum, (int64_t)nchars);
@@ -2318,11 +2369,10 @@ void shorten_buf_fname(buf_T *buf, char *dirname, int force)
       XFREE_CLEAR(buf->b_sfname);
     }
     char *p = path_shorten_fname(buf->b_ffname, dirname);
-    if (p != NULL) {
+    if (p != NULL && *p != NUL) {
       buf->b_sfname = xstrdup(p);
       buf->b_fname = buf->b_sfname;
-    }
-    if (p == NULL) {
+    } else {
       buf->b_fname = buf->b_ffname;
     }
   }
@@ -2454,7 +2504,14 @@ bool vim_fgets(char *buf, int size, FILE *fp)
 {
   char *retval;
 
-  assert(size > 0);
+  // safety check
+  if (size < 2) {
+    if (size == 1) {
+      buf[0] = NUL;
+    }
+    return true;
+  }
+
   buf[size - 2] = NUL;
 
   do {
@@ -3081,11 +3138,11 @@ void buf_reload(buf_T *buf, int orig_mode, bool reload_options)
   buf_T *savebuf;
   bufref_T bufref;
   int saved = OK;
-  aco_save_T aco;
+  CtxSwitch aco = { 0 };
   int flags = READ_NEW;
 
   // Set curwin/curbuf for "buf" and save some things.
-  aucmd_prepbuf(&aco, buf);
+  ctx_switch(&aco, NULL, NULL, buf, 0);
 
   // Unless reload_options is set, we only want to read the text from the
   // file, not reset the syntax highlighting, clear marks, diff status, etc.
@@ -3138,7 +3195,7 @@ void buf_reload(buf_T *buf, int orig_mode, bool reload_options)
     curbuf->b_flags |= BF_CHECK_RO;           // check for RO again
     curbuf->b_keep_filetype = true;           // don't detect 'filetype'
     if (readfile(buf->b_ffname, buf->b_fname, 0, 0,
-                 (linenr_T)MAXLNUM, &ea, flags, shortmess(SHM_FILEINFO)) != OK) {
+                 (linenr_T)MAXLNUM, &ea, flags, shortmess(kShmFileinfo)) != OK) {
       if (!aborting()) {
         semsg(_("E321: Could not reload \"%s\""), buf->b_fname);
       }
@@ -3201,7 +3258,7 @@ void buf_reload(buf_T *buf, int orig_mode, bool reload_options)
   do_modelines(0);
 
   // restore curwin/curbuf and a few other things
-  aucmd_restbuf(&aco);
+  ctx_restore(&aco);
   // Careful: autocommands may have made "buf" invalid!
 }
 
@@ -3223,26 +3280,10 @@ void write_lnum_adjust(linenr_T offset)
   }
 }
 
-#if defined(BACKSLASH_IN_FILENAME)
-/// Convert all backslashes in fname to forward slashes in-place,
-/// unless when it looks like a URL.
-void forward_slash(char *fname)
-{
-  if (path_with_url(fname)) {
-    return;
-  }
-  for (char *p = fname; *p != NUL; p++) {
-    if (*p == '\\') {
-      *p = '/';
-    }
-  }
-}
-#endif
-
 /// Path to Nvim's own temp dir. Ends in a slash.
 static char *vim_tempdir = NULL;
 #ifdef HAVE_DIRFD_AND_FLOCK
-DIR *vim_tempdir_dp = NULL;  ///< File descriptor of temp dir
+static DIR *vim_tempdir_dp = NULL;  ///< File descriptor of temp dir
 #endif
 
 /// Creates a directory for private use by this instance of Nvim, trying each of
@@ -3510,7 +3551,14 @@ static bool vim_settempdir(char *tempdir)
     return false;
   }
 
-  vim_FullName(tempdir, buf, MAXPATHL, false);
+  vim_FullName(tempdir, buf, MAXPATHL,
+#ifdef MSWIN
+               true
+#else
+               false
+#endif
+               );
+
   size_t buflen = strlen(buf);
   if (!after_pathsep(buf, buf + buflen)) {
     strcpy(buf + buflen, PATHSEPSTR);  // NOLINT(runtime/printf)
@@ -3814,7 +3862,7 @@ char *file_pat_to_reg_pat(const char *pat, const char *pat_end, char *allow_dirs
   return reg_pat;
 }
 
-#if defined(EINTR)
+#ifdef EINTR
 
 // Type of buffer size argument of read() and write() is platform-dependent.
 # ifdef MSWIN

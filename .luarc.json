@@ -4,14 +4,14 @@
     "version": "LuaJIT"
   },
   "workspace": {
-    "library": [
-      "${3rd}/busted/library"
-    ],
     "ignoreDir": [
       ".deps",
-      "build",
-      "test"
+      "build"
     ],
+    "ignoreGlobs": [
+      "test/**/fixtures/**"
+    ],
+    "preloadFileSize": 1000,
     "checkThirdParty": "Disable"
   },
   "diagnostics": {

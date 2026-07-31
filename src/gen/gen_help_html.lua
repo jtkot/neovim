@@ -7,7 +7,7 @@
 --
 -- USAGE (GENERATE HTML):
 --   1. `:helptags ALL` first; this script depends on vim.fn.taglist().
---   2. nvim -V1 -es --clean +"lua require('src.gen.gen_help_html').gen('./runtime/doc', 'target/dir/')" +q
+--   2. nvim -V1 -es --clean +"lua require('src.gen.gen_help_html').gen('html', './runtime/doc', 'target/dir/')" +q
 --      - Read the docstring at gen().
 --   3. cd target/dir/ && jekyll serve --host 0.0.0.0
 --   4. Visit http://localhost:4000/…/help.txt.html
@@ -22,17 +22,14 @@
 --   1. nvim -V1 -es +"lua require('src.gen.gen_help_html')._test()" +q
 --
 -- NOTES:
---   * This script is used by the automation repo: https://github.com/neovim/doc
+--   * This script is used by the website repo: https://github.com/neovim/neovim.github.io
 --   * :helptags checks for duplicate tags, whereas this script checks _links_ (to tags).
 --   * gen() and validate() are the primary (programmatic) entrypoints. validate() only exists
 --     because gen() is too slow (~1 min) to run in per-commit CI.
---   * visit_node() is the core function used by gen() to traverse the document tree and produce HTML.
+--   * ts_node_to_html() is the core function used by gen() to traverse the document tree and produce HTML.
 --   * visit_validate() is the core function used by validate().
 --   * Files in `new_layout` will be generated with a "flow" layout instead of preformatted/fixed-width layout.
 --
--- TODO:
---   * Conjoin listitem "blocks" (blank-separated). Example: starting.txt
-
 local pending_urls = 0
 local tagmap = nil ---@type table<string, string>
 local helpfiles = nil ---@type string[]
@@ -71,7 +68,6 @@ local M = {}
 -- All other files are "legacy" files which require fixed-width layout.
 local new_layout = {
   ['api.txt'] = true,
-  ['lsp.txt'] = true,
   ['channel.txt'] = true,
   ['deprecated.txt'] = true,
   ['dev.txt'] = true,
@@ -82,22 +78,27 @@ local new_layout = {
   ['dev_tools.txt'] = true,
   ['dev_vimpatch.txt'] = true,
   ['diagnostic.txt'] = true,
-  ['help.txt'] = true,
   ['faq.txt'] = true,
   ['gui.txt'] = true,
+  ['help.txt'] = true,
   ['intro.txt'] = true,
-  ['lua.txt'] = true,
+  ['job_control.txt'] = true,
+  ['lsp.txt'] = true,
+  ['lua-bit.txt'] = true,
   ['lua-guide.txt'] = true,
   ['lua-plugin.txt'] = true,
+  ['lua.txt'] = true,
   ['luaref.txt'] = true,
-  ['news.txt'] = true,
-  ['news-0.9.txt'] = true,
   ['news-0.10.txt'] = true,
   ['news-0.11.txt'] = true,
   ['news-0.12.txt'] = true,
+  ['news-0.9.txt'] = true,
+  ['news.txt'] = true,
   ['nvim.txt'] = true,
   ['pack.txt'] = true,
   ['provider.txt'] = true,
+  ['starting.txt'] = true,
+  ['terminal.txt'] = true,
   ['tui.txt'] = true,
   ['ui.txt'] = true,
   ['vim_diff.txt'] = true,
@@ -116,10 +117,7 @@ local redirects = {
 
 -- TODO: These known invalid |links| require an update to the relevant docs.
 local exclude_invalid = {
-  ["'string'"] = 'vimeval.txt',
-  Query = 'treesitter.txt',
   matchit = 'vim_diff.txt',
-  ['set!'] = 'treesitter.txt',
 }
 
 -- False-positive "invalid URLs".
@@ -134,8 +132,12 @@ local exclude_invalid_urls = {
   ['http://wiki.services.openoffice.org/wiki/Dictionaries'] = 'spell.txt',
   ['http://www.adapower.com'] = 'ft_ada.txt',
   ['http://www.jclark.com/'] = 'quickfix.txt',
-  ['https://cacm.acm.org/research/a-look-at-the-design-of-lua/'] = 'faq.txt', -- blocks GHA?
-  ['https://linux.die.net/man/2/poll'] = 'luvref.txt', -- blocks GHA?
+
+  -- Can't be accessed by GitHub runners:
+  ['https://cacm.acm.org/research/a-look-at-the-design-of-lua/'] = 'faq.txt',
+  ['https://linux.die.net/man/2/poll'] = 'luvref.txt',
+  ['https://www.kuwasha.net'] = 'uganda.txt',
+  ['https://www.kuwasha.net/'] = 'uganda.txt',
 }
 
 -- Deprecated, brain-damaged files that I don't care about.
@@ -244,6 +246,9 @@ local function is_noise(line, noise_lines)
 end
 
 --- Creates a github issue URL at neovim/tree-sitter-vimdoc with prefilled content.
+--- @param fname string
+--- @param to_fname string
+--- @param sample_text string
 --- @return string
 local function get_bug_url_vimdoc(fname, to_fname, sample_text)
   local this_url = string.format('https://neovim.io/doc/user/%s', vim.fs.basename(to_fname))
@@ -260,6 +265,10 @@ local function get_bug_url_vimdoc(fname, to_fname, sample_text)
 end
 
 --- Creates a github issue URL at neovim/neovim with prefilled content.
+--- @param fname string
+--- @param to_fname string
+--- @param sample_text string
+--- @param token_name? string
 --- @return string
 local function get_bug_url_nvim(fname, to_fname, sample_text, token_name)
   local this_url = string.format('https://neovim.io/doc/user/%s', vim.fs.basename(to_fname))
@@ -278,7 +287,7 @@ local function get_bug_url_nvim(fname, to_fname, sample_text, token_name)
 end
 
 --- Gets a "foo" name from a "foo.txt" helpfile name.
-local function get_helppage(f, with_extension)
+local function get_helppage_html(f, with_extension)
   if not f then
     return nil
   end
@@ -338,7 +347,7 @@ local function get_tagname(node, bufnr)
       and ("'%s'"):format(text)
     or text
   local helpfile = vim.fs.basename(tagmap[tag]) or nil -- "api.txt"
-  local helppage = get_helppage(helpfile) -- "api.html"
+  local helppage = get_helppage_html(helpfile) -- "api.html"
   return helppage, tag
 end
 
@@ -385,6 +394,13 @@ local function first(node, name)
     end
   end
   return nil
+end
+
+--- Gets the last child of `node`, or nil.
+---@param node TSNode
+local function last(node)
+  local n = node:child_count()
+  return n > 0 and node:child(n - 1) or nil
 end
 
 --- Gets the kind and node text of the previous and next siblings of node `n`.
@@ -481,7 +497,7 @@ local function visit_validate(root, level, lang_tree, opt, stats)
     and (not vim.tbl_contains({ 'codespan', 'taglink', 'tag' }, parent))
   then
     local text_nopunct = vim.fn.trim(text, '.,', 0) -- Ignore some punctuation.
-    local fname_basename = assert(vim.fs.basename(opt.fname))
+    local fname_basename = assert(vim.fs.basename(opt.fname --[[ @as string ]]))
     if spell_dict[text_nopunct] then
       local should_ignore = (
         spell_ignore_files[fname_basename] == true
@@ -530,7 +546,7 @@ end
 ---@param headings nvim.gen_help_html.heading[]
 ---@param opt table
 ---@param stats table
-local function visit_node(root, level, lang_tree, headings, opt, stats)
+local function ts_node_to_html(root, level, lang_tree, headings, opt, stats)
   level = level or 0
 
   local function node_text(node, ws_)
@@ -566,7 +582,7 @@ local function visit_node(root, level, lang_tree, headings, opt, stats)
     -- Process children and join them with whitespace.
     for node, _ in root:iter_children() do
       if node:named() then
-        local r = visit_node(node, level + 1, lang_tree, headings, opt, stats)
+        local r = ts_node_to_html(node, level + 1, lang_tree, headings, opt, stats)
         text = string.format('%s%s', text, r)
       end
     end
@@ -618,6 +634,36 @@ local function visit_node(root, level, lang_tree, headings, opt, stats)
     if is_blank(text) then
       return ''
     end
+
+    -- Conjoin list-item blocks: merge adjacent blocks that form a contiguous list.
+    local prev_block = root:prev_sibling()
+    local next_block = root:next_sibling()
+    local prev_last = prev_block and prev_block:type() == 'block' and last(prev_block)
+    local next_first = next_block and next_block:type() == 'block' and next_block:child(0)
+    local continues_list = root:child(0)
+      and root:child(0):type() == 'line_li'
+      and prev_last
+      and prev_last:type() == 'line_li'
+    local list_continues = last(root)
+      and last(root):type() == 'line_li'
+      and next_first
+      and next_first:type() == 'line_li'
+    if continues_list and list_continues then
+      return text
+    elseif continues_list then
+      -- Last continuation block: close the wrapper opened by the first block.
+      if opt.old then
+        return ('%s</div>\n'):format(trim(text, 2))
+      end
+      return string.format('%s\n</div>\n', text)
+    elseif list_continues then
+      -- First block of a list that continues: open wrapper but don't close.
+      if opt.old then
+        return ('<div class="old-help-para">%s'):format(trim(text, 2))
+      end
+      return string.format('<div class="help-para">\n%s', text)
+    end
+
     if opt.old then
       -- XXX: Treat "old" docs as preformatted: they use indentation for layout.
       --      Trim trailing newlines to avoid too much whitespace between divs.
@@ -645,19 +691,41 @@ local function visit_node(root, level, lang_tree, headings, opt, stats)
     local prev_li = sib and sib:type() == 'line_li'
     local cssclass = numli and 'help-li-num' or 'help-li'
 
+    -- Conjoin list items separated by blank lines (wrapped in separate blocks).
+    if not prev_li then
+      local parent_block = root:parent()
+      local prev_block = parent_block and parent_block:prev_sibling()
+      local prev_last = prev_block and prev_block:type() == 'block' and last(prev_block)
+      if prev_last and prev_last:type() == 'line_li' then
+        prev_li = true
+        sib = prev_last
+      end
+    end
+
     if not prev_li then
       opt.indent = 1
+      -- Track the leading whitespace for each indent level so that we can dedent
+      -- to the correct level later.
+      opt.indent_ws = { ws() }
     else
+      opt.indent_ws = opt.indent_ws or { ws() }
       local sib_ws = ws(sib)
       local this_ws = ws()
       if get_indent(node_text()) == 0 then
         opt.indent = 1
+        opt.indent_ws = { this_ws }
       elseif this_ws > sib_ws then
         -- Previous sibling is logically the _parent_ if it is indented less.
         opt.indent = opt.indent + 1
+        opt.indent_ws[opt.indent] = this_ws
       elseif this_ws < sib_ws then
-        -- TODO(justinmk): This is buggy. Need to track exact whitespace length for each level.
-        opt.indent = math.max(1, opt.indent - 1)
+        -- Dedent: pop indent levels whose tracked whitespace is deeper than the
+        -- current item, so we return to the correct ancestor level.
+        while opt.indent > 1 and (opt.indent_ws[opt.indent] or '') > this_ws do
+          opt.indent_ws[opt.indent] = nil
+          opt.indent = opt.indent - 1
+        end
+        opt.indent_ws[opt.indent] = this_ws
       end
     end
     local margin = opt.indent == 1 and '' or ('margin-left: %drem;'):format((1.5 * opt.indent))
@@ -791,12 +859,16 @@ local function get_helpfiles(dir, include)
 end
 
 --- Populates the helptags map.
+--- @param help_dir string
+--- @return table<string, string>
 local function _get_helptags(help_dir)
+  ---@type table<string, string>
   local m = {}
   -- Load a random help file to convince taglist() to do its job.
   vim.cmd(string.format('split %s/api.txt', help_dir))
   vim.cmd('lcd %:p:h')
-  for _, item in ipairs(vim.fn.taglist('.*')) do
+  local tags = vim.fn.taglist('.*') --[[ @as {name: string, filename: string}[] ]]
+  for _, item in ipairs(tags) do
     if vim.endswith(item.filename, '.txt') then
       m[item.name] = item.filename
     end
@@ -846,7 +918,7 @@ local function parse_buf(fname, text)
     buf = fname
     vim.cmd('sbuffer ' .. tostring(fname)) -- Buffer number.
   end
-  local lang_tree = assert(vim.treesitter.get_parser(buf, nil, { error = false }))
+  local lang_tree = assert(vim.treesitter.get_parser(buf, nil))
   lang_tree:parse()
   return lang_tree, buf
 end
@@ -884,7 +956,7 @@ end
 ---
 --- @return string html
 --- @return table stats
-local function gen_one(fname, text, to_fname, old, commit)
+local function gen_one_html(fname, text, to_fname, old, commit)
   local stats = {
     noise_lines = {},
     parse_errors = {},
@@ -899,7 +971,7 @@ local function gen_one(fname, text, to_fname, old, commit)
   for _, tree in ipairs(lang_tree:trees()) do
     main = main
       .. (
-        visit_node(
+        ts_node_to_html(
           tree:root(),
           0,
           tree,
@@ -946,7 +1018,7 @@ local function gen_helptags_json(fname)
     -- "foo.txt"
     local helpfile = vim.fs.basename(f)
     -- "foo.html"
-    local htmlpage = assert(get_helppage(helpfile))
+    local htmlpage = assert(get_helppage_html(helpfile))
     -- "foo.html#tag"
     t[tag] = ('%s#%s'):format(htmlpage, url_encode(tag))
   end
@@ -956,7 +1028,8 @@ end
 local function gen_helptag_html(fname)
   local frontmatter = vim.json.encode({
     title = 'Helptag redirect',
-    layout = 'helptag', -- Hugo-specific
+    layout = 'helptag',
+    aliases = { vim.fs.basename(fname) },
   }, { indent = '  ', sort_keys = true })
   tofile(fname, frontmatter)
 end
@@ -1030,6 +1103,53 @@ function M._test()
   print('all tests passed.\n')
 end
 
+--- Generate redirect pages for renamed help files.
+
+--- @param commit string?
+--- @param helpfile string Name of the help file being generated
+--- @param to_dir string Target directory where the output files will be written.
+--- @param to_fname string Name of the already-generated page in the new location
+---
+--- @return boolean Whether a redirect page has been generated
+local function gen_redirect_pages(commit, helpfile, to_dir, to_fname)
+  local helpfile_tag = (helpfile:gsub('%.txt$', '')):gsub('_', '-') -- "dev_tools.txt" => "dev-tools"
+  local redirect_from = redirects[helpfile]
+  if not redirect_from then
+    return false
+  end
+
+  local redirect_text = vim.text
+    .indent(
+      0,
+      [[
+      *%s*      Nvim
+
+      Document moved to: |%s|
+
+      ==============================================================================
+      Document moved
+
+      Document moved to: |%s|
+
+      ==============================================================================
+        vim:tw=78:ts=8:ft=help:norl:
+      ]]
+    )
+    :format(redirect_from, helpfile_tag, helpfile_tag, helpfile_tag, helpfile_tag, helpfile_tag)
+  local redirect_to_fname = get_helppage_html(redirect_from, true)
+  local redirect_to = ('%s/%s'):format(to_dir, redirect_to_fname)
+  local redirect_html, _ =
+    gen_one_html(redirect_from, redirect_text, redirect_to, false, commit or '?')
+  assert(
+    redirect_html:find(vim.pesc(helpfile_tag)),
+    ('not found in redirect html: %s'):format(helpfile_tag)
+  )
+  tofile(redirect_to, redirect_html)
+
+  print(('generated (redirect) : %-15s => %s'):format(redirect_from, vim.fs.basename(to_fname)))
+  return true
+end
+
 --- @class nvim.gen_help_html.gen_result
 --- @field helpfiles string[] list of generated HTML files, from the source docs {include}
 --- @field err_count integer number of parse errors in :help docs
@@ -1041,14 +1161,16 @@ end
 ---
 ---   gen('$VIMRUNTIME/doc', '/path/to/neovim.github.io/_site/doc/', {'api.txt', 'autocmd.txt', 'channel.txt'}, nil)
 ---
+--- @param output_format string Currently only "html"
 --- @param help_dir string Source directory containing the :help files. Must run `make helptags` first.
---- @param to_dir string Target directory where the .html files will be written.
+--- @param to_dir string Target directory where the output files will be written.
 --- @param include string[]|nil Process only these filenames. Example: {'api.txt', 'autocmd.txt', 'channel.txt'}
 --- @param commit string?
 --- @param parser_path string? path to non-default vimdoc.so/dylib/dll
 ---
 --- @return nvim.gen_help_html.gen_result result
-function M.gen(help_dir, to_dir, include, commit, parser_path)
+function M.gen(output_format, help_dir, to_dir, include, commit, parser_path)
+  vim.validate('output_format', output_format, 'string')
   vim.validate('help_dir', help_dir, function(d)
     return vim.fn.isdirectory(vim.fs.normalize(d)) == 1
   end, 'valid directory')
@@ -1077,17 +1199,34 @@ function M.gen(help_dir, to_dir, include, commit, parser_path)
 
   print(('output dir: %s\n\n'):format(to_dir))
   vim.fn.mkdir(to_dir, 'p')
-  -- NOTE: Better for Hugo to be in static/, but works fine with contents/ as to_dir
-  gen_helptags_json(('%s/helptags.json'):format(to_dir))
-  gen_helptag_html(('%s/helptag.html'):format(to_dir))
+
+  if output_format == 'html' then
+    -- NOTE: Better for Hugo to be in static/, but works fine with contents/ as to_dir
+    gen_helptags_json(('%s/helptags.json'):format(to_dir))
+    gen_helptag_html(('%s/helptag.html'):format(to_dir))
+  end
+
+  -- Map output formats to the function that outputs one file in that format
+  -- NOTE: Only .html for now, but .typ is coming
+  local generators = {
+    html = gen_one_html,
+  }
+  local gen_one = generators[output_format]
 
   for _, f in ipairs(helpfiles) do
     -- "foo.txt"
     local helpfile = vim.fs.basename(f)
-    -- "to/dir/foo.html"
-    local to_fname = ('%s/%s'):format(to_dir, get_helppage(helpfile, true))
-    local html, stats = gen_one(f, nil, to_fname, not new_layout[helpfile], commit or '?')
-    tofile(to_fname, html)
+
+    local to_fname = ''
+    if output_format == 'html' then
+      -- "to/dir/foo.html"
+      to_fname = ('%s/%s'):format(to_dir, get_helppage_html(helpfile, true))
+    else
+      to_fname = ('%s/%s.%s'):format(to_dir, helpfile:gsub('.txt', ''), output_format)
+    end
+
+    local converted_help, stats = gen_one(f, nil, to_fname, not new_layout[helpfile], commit or '?')
+    tofile(to_fname, converted_help)
     print(
       ('generated (%-2s errors): %-15s => %s'):format(
         #stats.parse_errors,
@@ -1096,44 +1235,11 @@ function M.gen(help_dir, to_dir, include, commit, parser_path)
       )
     )
 
-    -- Generate redirect pages for renamed help files.
-    local helpfile_tag = (helpfile:gsub('%.txt$', '')):gsub('_', '-') -- "dev_tools.txt" => "dev-tools"
-    local redirect_from = redirects[helpfile]
-    if redirect_from then
-      local redirect_text = vim.text
-        .indent(
-          0,
-          [[
-          *%s*      Nvim
-
-          Document moved to: |%s|
-
-          ==============================================================================
-          Document moved
-
-          Document moved to: |%s|
-
-          ==============================================================================
-           vim:tw=78:ts=8:ft=help:norl:
-          ]]
-        )
-        :format(redirect_from, helpfile_tag, helpfile_tag, helpfile_tag, helpfile_tag, helpfile_tag)
-      local redirect_to = ('%s/%s'):format(to_dir, get_helppage(redirect_from, true))
-      local redirect_html, _ =
-        gen_one(redirect_from, redirect_text, redirect_to, false, commit or '?')
-      assert(
-        redirect_html:find(vim.pesc(helpfile_tag)),
-        ('not found in redirect html: %s'):format(helpfile_tag)
-      )
-      tofile(redirect_to, redirect_html)
-
-      print(
-        ('generated (redirect) : %-15s => %s'):format(
-          redirect_from .. '.txt',
-          vim.fs.basename(to_fname)
-        )
-      )
-      redirects_count = redirects_count + 1
+    if output_format == 'html' then
+      local generated = gen_redirect_pages(commit, helpfile, to_dir, to_fname)
+      if generated then
+        redirects_count = redirects_count + 1
+      end
     end
 
     err_count = err_count + #stats.parse_errors
@@ -1143,8 +1249,12 @@ function M.gen(help_dir, to_dir, include, commit, parser_path)
   print(('total errors: %d'):format(err_count))
   -- Why aren't the netrw tags found in neovim/docs/ CI?
   print(('invalid tags: %s'):format(vim.inspect(invalid_links)))
-  eq(redirects_count, include and redirects_count or vim.tbl_count(redirects)) -- sanity check
-  print(('redirects: %d'):format(redirects_count))
+
+  if output_format == 'html' then
+    eq(redirects_count, include and redirects_count or vim.tbl_count(redirects)) -- sanity check
+    print(('redirects: %d'):format(redirects_count))
+  end
+
   print('\n')
 
   --- @type nvim.gen_help_html.gen_result
@@ -1266,7 +1376,7 @@ function M.test_gen(help_dir)
 
   -- Because gen() is slow (~30s), this test is limited to a few files.
   local input = { 'api.txt', 'index.txt', 'nvim.txt' }
-  local rv = M.gen(help_dir, tmpdir, input)
+  local rv = M.gen('html', help_dir, tmpdir, input)
   eq(#input, #rv.helpfiles)
   eq(0, rv.err_count, 'parse errors in :help docs')
   eq({}, rv.invalid_links, 'invalid tags in :help docs')

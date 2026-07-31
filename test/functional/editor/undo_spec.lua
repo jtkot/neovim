@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local clear = n.clear
 local command = n.command
 local expect = n.expect
@@ -223,5 +224,17 @@ describe(':undo! command', function()
       'Vim(undo):E5767: Cannot use :undo! to redo or move to a different undo branch',
       pcall_err(command, 'undo! 4')
     )
+  end)
+end)
+
+describe("opening file when 'undofile' is on", function()
+  before_each(function()
+    clear({ args = { '--cmd', 'set undofile' } })
+  end)
+
+  it("does not crash when 'undodir' contains empty entry", function()
+    command('set undodir=,.')
+    command('edit test/functional/fixtures/bigfile.txt')
+    n.assert_alive()
   end)
 end)

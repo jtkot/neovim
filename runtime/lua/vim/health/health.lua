@@ -1,12 +1,18 @@
+local nvim_on = require('vim._core.util').nvim_on
+
 local M = {}
 local health = require('vim.health')
 
 ---Run a system command and return ok and its stdout and stderr combined.
 ---@param cmd string[]
+---@param timeout? integer Timeout in ms (default: no timeout).
 ---@return boolean
 ---@return string
-local function system(cmd)
-  local result = vim.system(cmd, { text = true }):wait()
+local function system(cmd, timeout)
+  local result = vim.system(cmd, { text = true, timeout = timeout }):wait()
+  if not result then -- Workaround https://github.com/neovim/neovim/issues/37922
+    return false, 'command failed'
+  end
   return result.code == 0, vim.trim(('%s\n%s'):format(result.stdout, result.stderr))
 end
 
@@ -35,6 +41,8 @@ local function check_runtime()
     ['lua/vim/shared.lua'] = false,
     ['plugin/health.vim'] = false,
     ['plugin/man.vim'] = false,
+    ['plugin/nvim/net.lua'] = false,
+    ['plugin/nvim/spellfile.lua'] = false,
     ['queries/help/highlights.scm'] = false,
     ['queries/help/injections.scm'] = false,
     ['scripts.vim'] = false,
@@ -165,19 +173,111 @@ local function check_config()
   end
 end
 
+-- Note: this is part of check_performance().
+local function check_watchers()
+  local a = vim._watch.active
+  local total = a.watch + a.watchdirs + a.inotify
+  health.info(
+    ('Filewatchers (vim._watch): %d (watch=%d, watchdirs=%d, inotify=%d)'):format(
+      total,
+      a.watch,
+      a.watchdirs,
+      a.inotify
+    )
+  )
+
+  -- Walk libuv for an independent view. These counts include handles created outside `vim._watch`
+  -- (e.g. plugins calling `vim.uv.new_fs_event()` directly).
+  local libuv = { fs_event = 0, fs_poll = 0, process = 0, timer = 0 }
+  vim.uv.walk(function(handle)
+    if handle:is_closing() then
+      return
+    end
+    local t = handle:get_type()
+    if libuv[t] ~= nil then
+      libuv[t] = libuv[t] + 1
+    end
+  end)
+  health.info(
+    ('libuv handles: fs_event=%d, fs_poll=%d, process=%d, timer=%d'):format(
+      libuv.fs_event,
+      libuv.fs_poll,
+      libuv.process,
+      libuv.timer
+    )
+  )
+end
+
+--- Reads a single integer from a file (e.g. a `/proc/sys` entry).
+---@param path string
+---@return integer?
+local function read_int(path)
+  local ok, lines = pcall(vim.fn.readfile, path, '', 1)
+  local v = ok and lines[1] and tonumber(lines[1])
+  return v or nil
+end
+
+-- Note: this is part of check_performance().
+local function check_limits()
+  -- 'ulimit -n' (RLIMIT_NOFILE): each Nvim buffer may hold an open swapfile. Sockets, channels, filewatchers also consume file descriptors.
+  if vim.fn.has('win32') == 0 then
+    local ok, out = system({ 'sh', '-c', 'ulimit -Sn' }) -- Must use a shell.
+    out = vim.trim(out or '')
+    local soft = tonumber(out)
+    local used = require('vim._core.proc').count_open_fds()
+    local used_str = used and (', currently open: %d'):format(used) or ''
+    local raise_advice = {
+      '\'swapfile\' buffers, sockets, channels, and file-watchers consume file descriptors. A low limit causes "(libuv) kqueue(): Too many open files" (EMFILE) errors.',
+      'Increase the limit: add `ulimit -n 8192` to your shell rc. On macOS see also `launchctl limit maxfiles`; on Linux see `/etc/security/limits.conf` and systemd `LimitNOFILE`.',
+    }
+    if out == 'unlimited' then
+      health.ok(('ulimit -n (max open files): unlimited%s'):format(used_str))
+    elseif not ok or soft == nil then
+      health.info(('ulimit -n (max open files): unknown (%s)%s'):format(out, used_str))
+    elseif soft < 1024 then
+      health.warn(('ulimit -n (max open files) is low: %d%s'):format(soft, used_str), raise_advice)
+    elseif used and used > soft * 0.8 then
+      health.warn(
+        ('Open files near the limit: %d of %d (ulimit -n)'):format(used, soft),
+        raise_advice
+      )
+    else
+      health.ok(('ulimit -n (max open files): %d%s'):format(soft, used_str))
+    end
+  end
+
+  -- Linux inotify limits filewatchers (LSP, vim._watch). Exhausting them reports ENOSPC ("no space on device").
+  if vim.uv.os_uname().sysname == 'Linux' then
+    local watches = read_int('/proc/sys/fs/inotify/max_user_watches')
+    local instances = read_int('/proc/sys/fs/inotify/max_user_instances')
+    if watches and watches < 8192 then
+      health.warn(('fs.inotify.max_user_watches is low: %d'):format(watches), {
+        'Filewatchers may fail with ENOSPC. To increase the limit: `sysctl fs.inotify.max_user_watches=524288` (persist in /etc/sysctl.conf).',
+      })
+    end
+    if instances and instances < 128 then
+      health.warn(('fs.inotify.max_user_instances is low: %d'):format(instances), {
+        'To increase the limit: `sysctl fs.inotify.max_user_instances=512` (persist in /etc/sysctl.conf).',
+      })
+    end
+  end
+end
+
 local function check_performance()
   health.start('Performance')
 
   -- Check buildtype
-  local buildtype = vim.fn.matchstr(vim.fn.execute('version'), [[\v\cbuild type:?\s*[^\n\r\t ]+]])
+  local buildtype = vim.fn.matchstr(vim.fn.execute('version'), [[\v\cbuild type:?\s*[^\n\r\t]+]])
   if buildtype == '' then
     health.error('failed to get build type from :version')
-  elseif vim.regex([[\v(MinSizeRel|Release|RelWithDebInfo)]]):match_str(buildtype) then
+  elseif
+    vim.regex([[\v(MinSizeRel|RelWithDebInfo|Release(Fast|Safe|Small)?)]]):match_str(buildtype)
+  then
     health.ok(buildtype)
   else
     health.info(buildtype)
     health.warn('Non-optimized debug build. Nvim will be slower.', {
-      'Install a different Nvim package, or rebuild with `CMAKE_BUILD_TYPE=RelWithDebInfo`.',
+      'Install a different Nvim package, or rebuild with `CMAKE_BUILD_TYPE=RelWithDebInfo` (CMake) or `-Doptimize=ReleaseFast` (Zig).',
       suggest_faq,
     })
   end
@@ -193,6 +293,9 @@ local function check_performance()
       'Slow shell invocation (took ' .. vim.fn.printf('%.2f', elapsed_time) .. ' seconds).'
     )
   end
+
+  check_watchers()
+  check_limits()
 end
 
 -- Load the remote plugin manifest file and check for unregistered plugins
@@ -288,6 +391,8 @@ local function check_tmux()
 
   health.start('tmux')
 
+  health.warn('tmux is detected. Images may not display correctly.')
+
   -- check escape-time
   local suggestions =
     { 'set escape-time in ~/.tmux.conf:\nset-option -sg escape-time 10', suggest_faq }
@@ -295,10 +400,15 @@ local function check_tmux()
   if tmux_esc_time ~= 'error' then
     if tmux_esc_time == '' then
       health.error('`escape-time` is not set', suggestions)
-    elseif tonumber(tmux_esc_time) > 300 then
-      health.error('`escape-time` (' .. tmux_esc_time .. ') is higher than 300ms', suggestions)
     else
-      health.ok('escape-time: ' .. tmux_esc_time)
+      local tmux_esc_time_ms = vim._tointeger(tmux_esc_time)
+      if not tmux_esc_time_ms then
+        health.error('`escape-time` (' .. tmux_esc_time .. ') is not an integer', suggestions)
+      elseif tmux_esc_time_ms > 300 then
+        health.error('`escape-time` (' .. tmux_esc_time .. ') is higher than 300ms', suggestions)
+      else
+        health.ok('escape-time: ' .. tmux_esc_time)
+      end
     end
   end
 
@@ -361,12 +471,27 @@ local function check_tmux()
   end
 end
 
-local function check_terminal()
+-- Note: this is part of check_terminal().
+local function check_graphics()
+  local supported, msg = require('vim.ui.img')._supported()
+
+  if supported then
+    if msg then
+      health.ok(('Graphics protocol: supported (%s)'):format(msg))
+    else
+      health.ok('Graphics protocol: supported')
+    end
+  else
+    health.error('Graphics protocol: not supported by this terminal.')
+  end
+end
+
+-- Note: this is part of check_terminal().
+local function check_infocmp()
   if vim.fn.executable('infocmp') == 0 then
     return
   end
 
-  health.start('Terminal')
   local cmd = { 'infocmp', '-L' }
   local ok, out = system(cmd)
   local kbs_entry = vim.fn.matchstr(out, 'key_backspace=[^,[:space:]]*')
@@ -399,6 +524,14 @@ local function check_terminal()
       )
     )
   end
+end
+
+local function check_terminal()
+  health.start('Terminal')
+
+  check_graphics()
+
+  check_infocmp()
 
   for _, env_var in ipairs({
     'XTERM_VERSION',
@@ -544,21 +677,15 @@ end
 
 ---@param nvim_version string
 local function check_stable_version(nvim_version)
-  local result = vim
-    .system(
-      { 'git', 'ls-remote', '--tags', 'https://github.com/neovim/neovim' },
-      { text = true, timeout = 5000 }
-    )
-    :wait()
-  if result.code ~= 0 or not result.stdout or result.stdout == '' then
+  local ok, output =
+    system({ 'git', 'ls-remote', '--tags', 'https://github.com/neovim/neovim' }, 5000)
+  if not ok or output == '' then
     return
   end
   local stable_sha = assert(
-    result.stdout:match('(%x+)%s+refs/tags/stable%^{}')
-      or result.stdout:match('(%x+)%s+refs/tags/stable\n')
+    output:match('(%x+)%s+refs/tags/stable%^{}') or output:match('(%x+)%s+refs/tags/stable\n')
   )
-  local latest_version =
-    assert(result.stdout:match(stable_sha .. '%s+refs/tags/v?(%d+%.%d+%.%d+)%^{}'))
+  local latest_version = assert(output:match(stable_sha .. '%s+refs/tags/v?(%d+%.%d+%.%d+)%^{}'))
   local current_version = assert(nvim_version:match('v?(%d+%.%d+%.%d+)'))
   local current = vim.version.parse(current_version)
   local latest = vim.version.parse(latest_version)
@@ -571,22 +698,37 @@ end
 
 ---@param commit string
 local function check_head_hash(commit)
-  local result = vim
-    .system(
-      { 'git', 'ls-remote', 'https://github.com/neovim/neovim', 'HEAD' },
-      { text = true, timeout = 5000 }
-    )
-    :wait()
-  if result.code ~= 0 or not result.stdout or result.stdout == '' then
+  local ok, output = system(
+    { 'git', 'ls-remote', 'https://github.com/neovim/neovim', 'HEAD', 'refs/tags/nightly' },
+    5000
+  )
+  if not ok or output == '' then
     return
   end
-  local upstream = assert(result.stdout:match('^(%x+)'))
-  if not vim.startswith(upstream, commit) then
-    vim.health.warn(
-      ('Build is outdated. Local: %s, Latest: %s'):format(commit, upstream:sub(1, 12))
-    )
+
+  local refs = {} ---@type table<string, string>
+  for line in output:gmatch('[^\n]+') do
+    local sha, ref = line:match('^(%x+)%s+(%S+)$')
+    if sha and ref then
+      refs[ref] = sha
+    end
+  end
+
+  local head_sha = assert(refs['HEAD'])
+  local nightly_sha = refs['refs/tags/nightly']
+
+  if vim.startswith(head_sha, commit) then
+    vim.health.ok('Up to date (HEAD)')
+  elseif nightly_sha and vim.startswith(nightly_sha, commit) then
+    vim.health.ok('Up to date (nightly)')
   else
-    vim.health.ok(('Using latest HEAD: %s'):format(upstream:sub(1, 12)))
+    vim.health.warn(
+      ('Build is outdated. Local: %s, HEAD: %s%s'):format(
+        commit,
+        head_sha:sub(1, 12),
+        nightly_sha and (', Nightly: ' .. nightly_sha:sub(1, 12)) or ''
+      )
+    )
   end
 end
 
@@ -650,31 +792,27 @@ local function check_sysinfo()
     )
   )
 
-  vim.api.nvim_create_autocmd('FileType', {
-    pattern = 'checkhealth',
-    once = true,
-    callback = function(args)
-      local buf = args.buf
-      local win = vim.fn.bufwinid(buf)
-      if win == -1 then
-        return
-      end
-      local encoded_body = vim.uri_encode(body) --- @type string
-      local issue_url = 'https://github.com/neovim/neovim/issues/new?type=Bug&body=' .. encoded_body
+  nvim_on('FileType', nil, { pattern = 'checkhealth', once = true }, function(ev)
+    local buf = ev.buf
+    local win = vim.fn.bufwinid(buf)
+    if win == -1 then
+      return
+    end
+    local encoded_body = vim.uri_encode(body) --- @type string
+    local issue_url = 'https://github.com/neovim/neovim/issues/new?type=Bug&body=' .. encoded_body
 
-      _G.nvim_health_bugreport_open = function()
-        vim.ui.open(issue_url)
-      end
-      vim.wo[win].winbar =
-        '%#WarningMsg#%@v:lua.nvim_health_bugreport_open@Click to Create Bug Report on GitHub%X%*'
+    _G.nvim_health_bugreport_open = function()
+      vim.ui.open(issue_url)
+    end
+    vim.wo[win].winbar =
+      '%#WarningMsg#%@v:lua.nvim_health_bugreport_open@▶ Create Bug Report on GitHub%X%*'
 
-      vim.api.nvim_create_autocmd('BufDelete', {
-        buffer = buf,
-        once = true,
-        command = 'lua _G.nvim_health_bugreport_open = nil',
-      })
-    end,
-  })
+    vim.api.nvim_create_autocmd('BufDelete', {
+      buf = buf,
+      once = true,
+      command = 'lua _G.nvim_health_bugreport_open = nil',
+    })
+  end)
 end
 
 function M.check()

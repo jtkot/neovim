@@ -3,6 +3,8 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local tt = require('test.functional.testterm')
 
+local describe, it, before_each, setup, teardown =
+  t.describe, t.it, t.before_each, t.setup, t.teardown
 local clear, eq, neq = n.clear, t.eq, t.neq
 local feed, testprg = n.feed, n.testprg
 local fn = n.fn
@@ -861,12 +863,12 @@ describe(':terminal prints more lines than the screen height and exits', functio
       ("call jobstart(['%s', '10'], {'term':v:true}) | startinsert"):format(testprg('tty-test'))
     )
     screen:expect([[
+      line5                         |
       line6                         |
       line7                         |
       line8                         |
       line9                         |
-                                    |
-      [Process exited 0]^            |
+      ^[Process exited 0]            |
       {5:-- TERMINAL --}                |
     ]])
     feed('<cr>')
@@ -1096,9 +1098,8 @@ describe('pending scrollback line handling', function()
         or { 'printf', ('hi\n'):rep(12) }
     )
     screen:expect [[
-      hi                            |*4
-                                    |
-      [Process exited 0]^            |
+      hi                            |*5
+      ^[Process exited 0]            |
       {5:-- TERMINAL --}                |
     ]]
     assert_alive()

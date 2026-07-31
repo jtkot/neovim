@@ -3,7 +3,7 @@ local M = {}
 local health = vim.health
 
 local function get_lockfile_path()
-  return vim.fs.joinpath(vim.fn.stdpath('config'), 'nvim-pack-lock.json')
+  return vim.pack._plugin_lock_path or vim.go.packlockfile
 end
 
 local function get_plug_dir()
@@ -128,7 +128,10 @@ local function check_plugin_lock_data(plug_name, lock_data)
       ('Plugin %s is not at expected revision\n'):format(name_str)
         .. ('Expected: %s\nActual:   %s\n'):format(lock_data.rev, head)
         .. 'To synchronize, restart Nvim and run '
-        .. ('`vim.pack.update({ %s }, { offline = true })`'):format(name_str)
+        .. ('`vim.pack.update({ %s }, { offline = true })`\n'):format(name_str)
+        .. 'If there are no updates, delete `rev` lockfile entry (do not create trailing comma) '
+        .. 'and restart Nvim to regenerate lockfile data\n'
+        .. 'This can happen after updating plugins with read-only `$XDG_CONFIG_HOME`'
     )
     return false
   end
@@ -137,13 +140,17 @@ local function check_plugin_lock_data(plug_name, lock_data)
   if not has_origin then
     return failed_git_cmd(plug_name, plug_path)
   elseif lock_data.src ~= origin then
-    health.error(
-      ('Plugin %s has not expected source\n'):format(name_str)
-        .. ('Expected: %s\nActual:   %s\n'):format(lock_data.src, origin)
-        .. 'Delete `src` lockfile entry (do not create trailing comma) and '
-        .. 'restart Nvim to regenerate lockfile data'
-    )
-    return false
+    -- Check if lockfile source relies on "insteadOf" Git config
+    local ok, src_resolved = git_cmd({ 'ls-remote', '--get-url', lock_data.src }, plug_path)
+    if not (ok and src_resolved == origin) then
+      health.error(
+        ('Plugin %s has not expected source\n'):format(name_str)
+          .. ('Expected: %s\nActual:   %s\n'):format(lock_data.src, origin)
+          .. 'Delete `src` lockfile entry (do not create trailing comma) and '
+          .. 'restart Nvim to regenerate lockfile data'
+      )
+      return false
+    end
   end
 
   return true
@@ -152,7 +159,8 @@ end
 local function check_lockfile()
   health.start('vim.pack: lockfile')
 
-  local can_read, text = pcall(vim.fn.readblob, get_lockfile_path())
+  local path = get_lockfile_path()
+  local can_read, text = pcall(vim.fn.readblob, path)
   if not can_read then
     health.error('Could not read lockfile. Delete it and restart Nvim.')
     return
@@ -170,6 +178,18 @@ local function check_lockfile()
   end
 
   local is_good = true
+  if path ~= vim.go.packlockfile then
+    health.warn(
+      "Lockfile path is not the same as 'packlockfile' option value. "
+        .. "Set 'packlockfile' before the first usage of `vim.pack` function."
+    )
+    is_good = false
+  end
+  if path ~= vim.fs.abspath(path) then
+    health.warn('Lockfile path is not absolute. Make sure that this is intentional.')
+    is_good = false
+  end
+
   --- @cast data { plugins: table<string,table> }
   for plug_name, lock_data in pairs(data.plugins) do
     is_good = check_plugin_lock_data(plug_name, lock_data) and is_good
@@ -236,8 +256,13 @@ local function check_plug_dir()
 
   local is_good = true
   local plug_dir = get_plug_dir()
-  for plug_name, _ in vim.fs.dir(plug_dir) do
-    is_good = check_installed_plugin(plug_name) and is_good
+  for plug_name, _, err in vim.fs.dir(plug_dir, { err = true }) do
+    if err then
+      health.error(err)
+      is_good = false
+    else
+      is_good = check_installed_plugin(plug_name) and is_good
+    end
   end
 
   if is_good then

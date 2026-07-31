@@ -30,11 +30,11 @@
 #include "nvim/ex_getln.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
-#include "nvim/getchar_defs.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/hashtab.h"
+#include "nvim/input.h"
+#include "nvim/input_defs.h"
 #include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/lua/executor.h"
@@ -1407,7 +1407,7 @@ static int call_user_func_check(ufunc_T *fp, int argcount, typval_T *argvars, ty
   FUNC_ATTR_NONNULL_ARG(1, 3, 4, 5)
 {
   if (fp->uf_flags & FC_LUAREF) {
-    return typval_exec_lua_callable(fp->uf_luaref, argcount, argvars, rettv);
+    return nlua_exec_typval_callable(fp->uf_luaref, argcount, argvars, rettv);
   }
 
   if ((fp->uf_flags & FC_RANGE) && funcexe->fe_doesrange != NULL) {
@@ -1460,7 +1460,7 @@ void set_current_funccal(funccall_T *fc)
   current_funccal = fc;
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 void free_all_functions(void)
 {
   hashitem_T *hi;
@@ -1741,7 +1741,7 @@ int call_func(const char *funcname, int len, typval_T *rettv, int argcount_in, t
       if (len > 0) {
         error = FCERR_NONE;
         argv_add_base(funcexe->fe_basetv, &argvars, &argcount, argv, &argv_base);
-        nlua_typval_call(funcname, (size_t)len, argvars, argcount, rettv);
+        nlua_call_vlua(funcname, (size_t)len, argvars, argcount, rettv);
       } else {
         // v:lua was called directly; show its name in the emsg
         XFREE_CLEAR(name);
@@ -1827,7 +1827,7 @@ int call_simple_luafunc(const char *funcname, size_t len, typval_T *rettv)
 
   typval_T argvars[1];
   argvars[0].v_type = VAR_UNKNOWN;
-  nlua_typval_call(funcname, len, argvars, 0, rettv);
+  nlua_call_vlua(funcname, len, argvars, 0, rettv);
   return OK;
 }
 
@@ -2737,21 +2737,27 @@ void ex_function(exarg_T *eap)
     }
     if (arg != NULL && (fudi.fd_di == NULL || !tv_is_func(fudi.fd_di->di_tv))) {
       char *name_base = arg;
-      if ((uint8_t)(*arg) == K_SPECIAL) {
-        name_base = vim_strchr(arg, '_');
-        if (name_base == NULL) {
-          name_base = arg + 3;
-        } else {
-          name_base++;
+      // When defining a dictionary function with bracket notation
+      // (e.g. obj['foo-bar']()), the key is a dictionary key and is not
+      // required to follow function naming rules.  Skip the identifier
+      // check in that case.
+      if (arg != fudi.fd_newkey) {
+        if ((uint8_t)(*arg) == K_SPECIAL) {
+          name_base = vim_strchr(arg, '_');
+          if (name_base == NULL) {
+            name_base = arg + 3;
+          } else {
+            name_base++;
+          }
         }
-      }
-      int i;
-      for (i = 0; name_base[i] != NUL && (i == 0
-                                          ? eval_isnamec1(name_base[i])
-                                          : eval_isnamec(name_base[i])); i++) {}
-      if (name_base[i] != NUL) {
-        emsg_funcname(e_invarg2, arg);
-        goto ret_free;
+        int i;
+        for (i = 0; name_base[i] != NUL && (i == 0
+                                            ? eval_isnamec1(name_base[i])
+                                            : eval_isnamec(name_base[i])); i++) {}
+        if (name_base[i] != NUL) {
+          emsg_funcname(e_invarg2, arg);
+          goto ret_free;
+        }
       }
     }
     // Disallow using the g: dict.
@@ -2929,11 +2935,14 @@ void ex_function(exarg_T *eap)
     fp = alloc_ufunc(name, namelen);
 
     if (fudi.fd_dict != NULL) {
+      char *func_name = xmemdupz(name, namelen);
+
       if (fudi.fd_di == NULL) {
         // Add new dict entry
         fudi.fd_di = tv_dict_item_alloc(fudi.fd_newkey);
         if (tv_dict_add(fudi.fd_dict, fudi.fd_di) == FAIL) {
           xfree(fudi.fd_di);
+          xfree(func_name);
           XFREE_CLEAR(fp);
           goto erret;
         }
@@ -2942,7 +2951,7 @@ void ex_function(exarg_T *eap)
         tv_clear(&fudi.fd_di->di_tv);
       }
       fudi.fd_di->di_tv.v_type = VAR_FUNC;
-      fudi.fd_di->di_tv.vval.v_string = xmemdupz(name, namelen);
+      fudi.fd_di->di_tv.vval.v_string = func_name;
 
       // behave like "dict" was used
       flags |= FC_DICT;
@@ -3514,7 +3523,7 @@ static void handle_defer_one(funccall_T *funccal)
   ga_clear(&funccal->fc_defer);
 }
 
-/// Called when exiting: call all defer functions.
+/// When exiting: call all ":defer" functions.
 void invoke_all_defer(void)
 {
   for (funccall_T *fc = current_funccal; fc != NULL; fc = fc->fc_caller) {

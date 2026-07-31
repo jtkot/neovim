@@ -2,7 +2,6 @@ local ui = require('vim._core.ui2')
 local api, fn = vim.api, vim.fn
 ---@class vim._core.ui2.cmdline
 local M = {
-  highlighter = nil, ---@type vim.treesitter.highlighter?
   indent = 0, -- Current indent for block event.
   prompt = false, -- Whether a prompt is active; route to dialog regardless of ui.cfg.msg.target.
   dialog = false, -- Whether a dialog window was opened.
@@ -10,6 +9,8 @@ local M = {
   erow = 0, -- Buffer row at which the current cmdline ends; messages appended here in block mode.
   level = 0, -- Current cmdline level; 0 when inactive.
   wmnumode = 0, -- wildmenumode() when not using the pum, dialog position adjusted when toggled.
+  -- Non-zero for entered expanded cmdline, incremented for each message emitted as a result of entered command to move and open messages in the pager.
+  expand = 0,
 }
 
 --- Set the 'cmdheight' and cmdline window height. Reposition message windows.
@@ -21,7 +22,7 @@ local function win_config(win, hide, height)
   if ui.cmdheight == 0 and api.nvim_win_get_config(win).hide ~= hide then
     api.nvim_win_set_config(win, { hide = hide, height = not hide and height or nil })
   elseif api.nvim_win_get_height(win) ~= height then
-    api.nvim_win_set_height(win, height)
+    api.nvim_win_resize(win, -1, height)
   end
   if vim.o.cmdheight ~= height then
     -- Avoid moving the cursor with 'splitkeep' = "screen", and altering the user
@@ -44,7 +45,8 @@ local promptlen = 0 -- Current length of the last line in the prompt.
 ---@alias CmdContent CmdChunk[]
 ---@param content CmdContent
 ---@param prompt string
-local function set_text(content, prompt)
+---@param hl_id integer Prompt highlight group.
+local function set_text(content, prompt, hl_id)
   local lines = {} ---@type string[]
   for line in (prompt .. '\n'):gmatch('(.-)\n') do
     lines[#lines + 1] = fn.strtrans(line)
@@ -55,6 +57,29 @@ local function set_text(content, prompt)
   end
   lines[#lines] = ('%s%s '):format(lines[#lines], fn.strtrans(cmdbuff))
   api.nvim_buf_set_lines(ui.bufs.cmd, M.srow, -1, false, lines)
+
+  -- Highlight prompt, or parse and highlight line starting with ':' as Vimscript.
+  if promptlen > 0 and hl_id > 0 then
+    local opts = { invalidate = true, undo_restore = false, end_col = promptlen, hl_group = hl_id }
+    opts.end_line = M.erow
+    api.nvim_buf_set_extmark(ui.bufs.cmd, ui.ns, M.srow, 0, opts)
+  elseif lines[1]:sub(1, 1) == ':' then
+    local parser = vim.treesitter.get_string_parser(lines[1], 'vim')
+    parser:parse(true)
+    parser:for_each_tree(function(tstree, tree)
+      local query = tstree and vim.treesitter.query.get(tree:lang(), 'highlights')
+      if query then
+        for capture, node in query:iter_captures(tstree:root(), lines[1]) do
+          local _, start_col, _, end_col = node:range()
+          if query.captures[capture]:sub(1, 1) ~= '_' then
+            local opts = { invalidate = true, undo_restore = false, end_col = end_col }
+            opts.hl_group = ('@%s.%s'):format(query.captures[capture], query.lang)
+            api.nvim_buf_set_extmark(ui.bufs.cmd, ui.ns, M.srow, start_col, opts)
+          end
+        end
+      end
+    end)
+  end
 end
 
 --- Set the cmdline buffer text and cursor position.
@@ -62,29 +87,25 @@ end
 ---@param content CmdContent
 ---@param pos integer
 ---@param firstc string
----@param prompt string
+---@param prompt string|false
 ---@param indent integer
 ---@param level integer
 ---@param hl_id integer
 function M.cmdline_show(content, pos, firstc, prompt, indent, level, hl_id)
-  M.level, M.indent, M.prompt = level, indent, #prompt > 0
-  if M.highlighter == nil or M.highlighter.bufnr ~= ui.bufs.cmd then
-    local parser = assert(vim.treesitter.get_parser(ui.bufs.cmd, 'vim', {}))
-    M.highlighter = vim.treesitter.highlighter.new(parser)
+  -- Move expanded messages, or messages emitted before a prompt to dialog window.
+  if M.level == 0 and (ui.msg.cmd_on_key or (hl_id >= 0 and next(ui.msg.cmd.ids) ~= nil)) then
+    M.expand, M.dialog, ui.msg.cmd_on_key = 1, true, nil
+    api.nvim_win_set_config(ui.wins.cmd, { border = 'none' })
+    ui.msg.expand_msg('cmd', 'dialog')
+  elseif ui.msg.cmd.msg_row ~= -1 and M.expand == 0 then
+    ui.msg.cmd:clear()
   end
-  -- Only enable TS highlighter for Ex commands (not search or filter commands).
-  M.highlighter.active[ui.bufs.cmd] = firstc == ':' and M.highlighter or nil
-  if ui.msg.cmd.msg_row ~= -1 then
-    ui.msg.msg_clear()
-  end
+
+  M.level, M.indent, M.prompt = level, indent, hl_id >= 0
+  set_text(content, ('%s%s%s'):format(firstc, prompt, (' '):rep(indent)), hl_id)
   ui.msg.virt.last = { {}, {}, {}, {} }
 
-  set_text(content, ('%s%s%s'):format(firstc, prompt, (' '):rep(indent)))
-  if promptlen > 0 and hl_id > 0 then
-    api.nvim_buf_set_extmark(ui.bufs.cmd, ui.ns, 0, 0, { hl_group = hl_id, end_col = promptlen })
-  end
-
-  local height = math.max(ui.cmdheight, api.nvim_win_text_height(ui.wins.cmd, {}).all)
+  local height = math.max(ui.cmdheight, api.nvim_win_text_height(ui.wins.cmd).all)
   win_config(ui.wins.cmd, false, height)
   M.cmdline_pos(pos)
 end
@@ -100,24 +121,18 @@ function M.cmdline_special_char(c, shift)
   end)
 end
 
-local curpos = { 0, 0 } -- Last drawn cursor position.
 --- Set the cmdline cursor position.
 ---
 ---@param pos integer
 --@param level integer
 function M.cmdline_pos(pos)
   pos = #fn.strtrans(cmdbuff:sub(1, pos))
-  if curpos[1] ~= M.erow + 1 or curpos[2] ~= promptlen + pos then
-    curpos[1], curpos[2] = M.erow + 1, promptlen + pos
-    -- Add matchparen highlighting to non-prompt part of cmdline.
-    if pos > 0 and fn.exists('#matchparen#CursorMoved') == 1 then
-      api.nvim_win_set_cursor(ui.wins.cmd, { curpos[1], curpos[2] - 1 })
-      vim._with({ win = ui.wins.cmd, wo = { eventignorewin = '' } }, function()
-        api.nvim_exec_autocmds('CursorMoved', {})
-      end)
-    end
-    api.nvim_win_set_cursor(ui.wins.cmd, curpos)
+  -- Add matchparen highlighting to non-prompt part of cmdline.
+  if pos > 0 and vim.g.loaded_matchparen == 1 and fn.exists(':DoMatchParen') > 0 then
+    api.nvim_win_set_cursor(ui.wins.cmd, { M.erow + 1, promptlen + pos - 1 })
+    require('nvim.matchparen').highlight_matching_pair(ui.wins.cmd)
   end
+  api.nvim_win_set_cursor(ui.wins.cmd, { M.erow + 1, promptlen + pos })
 end
 
 --- Leaving the cmdline, restore 'cmdheight' and 'ruler'.
@@ -125,14 +140,22 @@ end
 ---@param level integer
 ---@param abort boolean
 function M.cmdline_hide(level, abort)
-  if M.srow > 0 or level > (fn.getcmdwintype() == '' and 1 or 2) then
+  if M.expand > 0 then
+    -- Close expanded cmdline, keep last line.
+    vim.schedule(function()
+      api.nvim_win_close(ui.wins.cmd, true)
+      api.nvim_buf_set_lines(ui.bufs.cmd, 0, M.erow, false, {})
+      ui.check_targets()
+      M.expand, M.srow = 0, 0
+    end)
+  elseif M.srow > 0 or level > (fn.getcmdwintype() == '' and 1 or 2) then
     return -- No need to hide when still in nested cmdline or cmdline_block.
   end
 
   fn.clearmatches(ui.wins.cmd) -- Clear matchparen highlights.
   api.nvim_win_set_cursor(ui.wins.cmd, { 1, 0 })
-  if M.prompt or abort then
-    -- Clear cmd buffer prompt or aborted command (non-abort is left visible).
+  if M.prompt or abort or cmdbuff == '' then
+    -- Clear cmd buffer prompt or aborted/empty command (non-abort is left visible).
     api.nvim_buf_set_lines(ui.bufs.cmd, 0, -1, false, {})
   end
 
@@ -147,7 +170,7 @@ function M.cmdline_hide(level, abort)
     end
   end)
 
-  M.prompt, M.level, curpos[1], curpos[2] = false, 0, 0, 0
+  M.prompt, M.level = false, 0
   win_config(ui.wins.cmd, true, ui.cmdheight)
 end
 
@@ -156,7 +179,7 @@ end
 ---@param lines CmdContent[]
 function M.cmdline_block_show(lines)
   for _, content in ipairs(lines) do
-    set_text(content, ':')
+    set_text(content, ':', 0)
     M.srow = M.srow + 1
   end
 end
@@ -165,7 +188,7 @@ end
 ---
 ---@param line CmdContent
 function M.cmdline_block_append(line)
-  set_text(line, ':')
+  set_text(line, ':', 0)
   M.srow = M.srow + 1
 end
 

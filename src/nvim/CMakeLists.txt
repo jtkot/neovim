@@ -29,7 +29,7 @@ target_include_directories(main_lib SYSTEM BEFORE INTERFACE ${LUV_INCLUDE_DIR})
 target_link_libraries(main_lib INTERFACE ${LUV_LIBRARY})
 
 find_package(Iconv REQUIRED)
-find_package(Libuv 1.28.0 REQUIRED)
+find_package(Libuv 1.46.0 REQUIRED)
 find_package(Lpeg REQUIRED)
 find_package(Treesitter 0.25.0 REQUIRED)
 find_package(UTF8proc REQUIRED)
@@ -53,7 +53,7 @@ if(ENABLE_UNIBILIUM)
 endif()
 
 if(ENABLE_WASMTIME)
-  find_package(Wasmtime 36.0.6 EXACT REQUIRED)
+  find_package(Wasmtime 36.0 EXACT REQUIRED)
   target_link_libraries(main_lib INTERFACE wasmtime)
   target_compile_definitions(nvim_bin PRIVATE HAVE_WASMTIME)
 endif()
@@ -134,15 +134,18 @@ elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     $<$<CONFIG:Release>:-Wno-unused-result>
     $<$<CONFIG:RelWithDebInfo>:-Wno-unused-result>
     $<$<CONFIG:MinSizeRel>:-Wno-unused-result>)
+
+  target_link_options(nvim_bin PRIVATE -Wno-free-nonheap-object) # see #37250
 elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
   # On FreeBSD 64 math.h uses unguarded C11 extension, which taints clang
   # 3.4.1 used there.
-  if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+  # on GNU/Linux, glibc 2.43 is tainted with c11 features when you use _GNU_SOURCE
+  if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(main_lib INTERFACE -Wno-c11-extensions)
   endif()
 
   # workaround for clang-11 on macOS, supported on later versions
-  if(NOT APPLE)
+  if(NOT APPLE AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(nvim_bin PRIVATE -Wl,--no-undefined)
   endif()
 endif()
@@ -153,7 +156,7 @@ if(UNIX)
   if (CMAKE_SYSTEM_NAME STREQUAL "Haiku")
     target_link_libraries(main_lib INTERFACE bsd)
     target_link_libraries(nvim_bin PRIVATE -lnetwork)
-  elseif (NOT CMAKE_SYSTEM_NAME STREQUAL "SunOS")
+  elseif (NOT CMAKE_SYSTEM_NAME STREQUAL "SunOS" AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(main_lib INTERFACE util)
   endif()
 endif()
@@ -333,6 +336,8 @@ set(GENERATED_OPTIONS ${GENERATED_DIR}/options.generated.h)
 set(GENERATED_OPTIONS_ENUM ${GENERATED_DIR}/options_enum.generated.h)
 set(GENERATED_OPTIONS_MAP ${GENERATED_DIR}/options_map.generated.h)
 set(GENERATED_OPTION_VARS ${GENERATED_DIR}/option_vars.generated.h)
+set(GENERATED_OPTIONS_CHARTAB ${GENERATED_DIR}/options_chartab.generated.h)
+set(GENERATED_OPTIONS_KEYSETS ${GENERATED_DIR}/options_keysets.generated.h)
 set(GENERATED_UI_EVENTS_CALL ${GENERATED_DIR}/ui_events_call.generated.h)
 set(GENERATED_UI_EVENTS_CLIENT ${GENERATED_DIR}/ui_events_client.generated.h)
 set(GENERATED_UI_EVENTS_REMOTE ${GENERATED_DIR}/ui_events_remote.generated.h)
@@ -350,6 +355,7 @@ set(LUA_INSPECT_MODULE_SOURCE ${NVIM_RUNTIME_DIR}/lua/vim/inspect.lua)
 set(LUA_KEYMAP_MODULE_SOURCE ${NVIM_RUNTIME_DIR}/lua/vim/keymap.lua)
 set(LUA_LOADER_MODULE_SOURCE ${NVIM_RUNTIME_DIR}/lua/vim/loader.lua)
 set(LUA_TEXT_MODULE_SOURCE ${NVIM_RUNTIME_DIR}/lua/vim/text.lua)
+set(LUA_TTY_MODULE_SOURCE ${NVIM_RUNTIME_DIR}/lua/vim/tty.lua)
 
 # Find all Lua modules in the _core/ directory.
 file(GLOB LUA_CORE_MODULE_SOURCES ${NVIM_RUNTIME_DIR}/lua/vim/_core/*.lua)
@@ -358,6 +364,11 @@ foreach(core_source ${LUA_CORE_MODULE_SOURCES})
   get_filename_component(core_filename ${core_source} NAME_WE)
   list(APPEND LUA_CORE_COMMAND_ARGS ${core_source} "vim._core.${core_filename}")
 endforeach()
+
+set(LUA_BLOB_COMPILE_FLAG)
+if(COMPILE_LUA AND NOT WIN32)
+  set(LUA_BLOB_COMPILE_FLAG -c)
+endif()
 
 file(GLOB API_HEADERS CONFIGURE_DEPENDS api/*.h)
 list(REMOVE_ITEM API_HEADERS ${CMAKE_CURRENT_LIST_DIR}/api/ui_events.in.h)
@@ -434,6 +445,8 @@ list(APPEND UNCRUSTIFY_NVIM_SOURCES ${NVIM_SOURCES} ${NVIM_HEADERS})
 list(APPEND UNCRUSTIFY_NVIM_SOURCES
   ${PROJECT_SOURCE_DIR}/src/tee/tee.c
   ${PROJECT_SOURCE_DIR}/src/xxd/xxd.c
+  ${PROJECT_SOURCE_DIR}/src/wasm_stubs.c
+  ${PROJECT_SOURCE_DIR}/src/static_ts_registry.c
 )
 
 foreach(sfile ${NVIM_SOURCES})
@@ -633,9 +646,7 @@ add_custom_command(
 
 add_custom_command(
   OUTPUT ${VIM_MODULE_FILE}
-  COMMAND ${CMAKE_COMMAND} -E env
-      "LUAC_PRG=${LUAC_PRG}"
-      ${LUA_PRG} ${CHAR_BLOB_GENERATOR} -c ${VIM_MODULE_FILE}
+  COMMAND ${LUA_PRG} ${CHAR_BLOB_GENERATOR} ${LUA_BLOB_COMPILE_FLAG} ${VIM_MODULE_FILE}
       # NB: vim._init_packages and vim.inspect must be be first and second ones
       # respectively, otherwise --luamod-dev won't work properly.
       ${LUA_INIT_PACKAGES_MODULE_SOURCE} "vim._init_packages"
@@ -646,6 +657,7 @@ add_custom_command(
       ${LUA_KEYMAP_MODULE_SOURCE} "vim.keymap"
       ${LUA_LOADER_MODULE_SOURCE} "vim.loader"
       ${LUA_TEXT_MODULE_SOURCE} "vim.text"
+      ${LUA_TTY_MODULE_SOURCE} "vim.tty"
       ${LUA_CORE_COMMAND_ARGS}
   DEPENDS
     ${CHAR_BLOB_GENERATOR}
@@ -657,6 +669,7 @@ add_custom_command(
     ${LUA_KEYMAP_MODULE_SOURCE}
     ${LUA_LOADER_MODULE_SOURCE}
     ${LUA_TEXT_MODULE_SOURCE}
+    ${LUA_TTY_MODULE_SOURCE}
     ${LUA_CORE_MODULE_SOURCES}
   VERBATIM
 )
@@ -700,8 +713,8 @@ add_custom_command(OUTPUT ${GENERATED_KEYCODE_NAMES}
   DEPENDS ${LUA_GEN_DEPS} ${KEYCODES_GENERATOR} ${GENERATOR_HASHY} ${CMAKE_CURRENT_LIST_DIR}/keycodes.lua
 )
 
-add_custom_command(OUTPUT ${GENERATED_OPTIONS} ${GENERATED_OPTIONS_ENUM} ${GENERATED_OPTIONS_MAP} ${GENERATED_OPTION_VARS}
-  COMMAND ${LUA_GEN} ${OPTIONS_GENERATOR} ${GENERATED_OPTIONS} ${GENERATED_OPTIONS_ENUM} ${GENERATED_OPTIONS_MAP} ${GENERATED_OPTION_VARS} ${CMAKE_CURRENT_LIST_DIR}/options.lua
+add_custom_command(OUTPUT ${GENERATED_OPTIONS} ${GENERATED_OPTIONS_ENUM} ${GENERATED_OPTIONS_MAP} ${GENERATED_OPTION_VARS} ${GENERATED_OPTIONS_CHARTAB} ${GENERATED_OPTIONS_KEYSETS}
+  COMMAND ${LUA_GEN} ${OPTIONS_GENERATOR} ${GENERATED_OPTIONS} ${GENERATED_OPTIONS_ENUM} ${GENERATED_OPTIONS_MAP} ${GENERATED_OPTION_VARS} ${GENERATED_OPTIONS_CHARTAB} ${GENERATED_OPTIONS_KEYSETS} ${CMAKE_CURRENT_LIST_DIR}/options.lua
   DEPENDS ${LUA_GEN_DEPS} ${OPTIONS_GENERATOR} ${GENERATOR_HASHY} ${CMAKE_CURRENT_LIST_DIR}/options.lua
 )
 
@@ -721,6 +734,8 @@ list(APPEND NVIM_GENERATED_FOR_SOURCES
   "${GENERATED_KEYCODE_NAMES}"
   "${GENERATED_OPTIONS}"
   "${GENERATED_OPTIONS_MAP}"
+  "${GENERATED_OPTIONS_CHARTAB}"
+  "${GENERATED_OPTIONS_KEYSETS}"
   "${VIM_MODULE_FILE}"
   "${GENERATED_API_METADATA}"
   "${PROJECT_BINARY_DIR}/cmake.config/auto/pathdef.h"
@@ -905,11 +920,13 @@ add_glob_target(
   --checks='
   -*,
   clang-analyzer-*,
+  -clang-analyzer-core.FixedAddressDereference,
   -clang-analyzer-core.NullDereference,
   -clang-analyzer-core.UndefinedBinaryOperatorResult,
   -clang-analyzer-core.uninitialized.Assign,
   -clang-analyzer-optin.core.EnumCastOutOfRange,
   -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-security.ArrayBound,
   -clang-analyzer-security.insecureAPI.strcpy,
   -clang-analyzer-unix.StdCLibraryFunctions,
   -clang-analyzer-unix.Stream,

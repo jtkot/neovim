@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear, command = n.clear, n.command
 local expect, feed = n.expect, n.feed
 local eq, eval = t.eq, n.eval
@@ -56,6 +57,18 @@ describe(':emenu', function()
         this]])
     -- Assert that Edit.Paste pasted @" into the commandline.
     eq('thiscmdmode', eval('getcmdline()'))
+  end)
+
+  it('popup menu in visual mode via <C-o> from insert mode #19473', function()
+    n.exec([[
+      aunmenu *
+      source $VIMRUNTIME/menu.vim
+    ]])
+    feed('itext<C-o>V')
+    command('emenu PopUp.Cut')
+    eq('', fn.getline(1))
+    eq('text\n', fn.getreg('"'))
+    eq('', n.api.nvim_get_vvar('errmsg'))
   end)
 end)
 

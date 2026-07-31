@@ -14,6 +14,7 @@
 #include "nvim/cmdexpand.h"
 #include "nvim/cmdexpand_defs.h"
 #include "nvim/errors.h"
+#include "nvim/eval/typval.h"
 #include "nvim/ex_cmds.h"
 #include "nvim/ex_cmds_defs.h"
 #include "nvim/ex_docmd.h"
@@ -32,6 +33,7 @@
 #include "nvim/memline.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
+#include "nvim/normal.h"
 #include "nvim/option.h"
 #include "nvim/option_defs.h"
 #include "nvim/option_vars.h"
@@ -52,6 +54,7 @@
 #include "help.c.generated.h"
 
 /// ":help": open a read-only window on a help file
+/// ":help!": DWIM parse the best match at cursor
 void ex_help(exarg_T *eap)
 {
   char *arg;
@@ -76,11 +79,6 @@ void ex_help(exarg_T *eap)
     }
     arg = eap->arg;
 
-    if (eap->forceit && *arg == NUL && !curbuf->b_help) {
-      emsg(_("E478: Don't panic!"));
-      return;
-    }
-
     if (eap->skip) {        // not executing commands
       return;
     }
@@ -97,9 +95,28 @@ void ex_help(exarg_T *eap)
   // Check for a specified language
   char *lang = check_help_lang(arg);
 
+  // ":help!" (bang, no args).
+  bool helpbang = (eap != NULL && eap->forceit && *arg == NUL);
+
   // When no argument given go to the index.
-  if (*arg == NUL) {
+  if (*arg == NUL && !helpbang) {
     arg = "help.txt";
+  }
+
+  // ":help!" (bang, no args): DWIM help, resolve best tag at cursor via Lua.
+  char *allocated_arg = NULL;
+  if (helpbang) {
+    typval_T no_args[] = { { .v_type = VAR_UNKNOWN } };
+    typval_T rettv;
+    nlua_call_typval("vim._core.help", "resolve_tag", no_args, &rettv);
+    if (rettv.v_type == VAR_STRING && rettv.vval.v_string != NULL && *rettv.vval.v_string != NUL) {
+      allocated_arg = rettv.vval.v_string;  // takes ownership
+      arg = allocated_arg;
+    } else {
+      tv_clear(&rettv);
+      emsg(_(e_noident));
+      return;
+    }
   }
 
   // Check if there is a match for the argument.
@@ -118,13 +135,14 @@ void ex_help(exarg_T *eap)
   }
   if (i >= num_matches || n == FAIL) {
     if (lang != NULL) {
-      semsg(_("E661: Sorry, no '%s' help for %s"), lang, arg);
+      semsg(_("E661: No '%s' help for %s"), lang, arg);
     } else {
-      semsg(_("E149: Sorry, no help for %s"), arg);
+      semsg(_("E149: No help for %s"), arg);
     }
     if (n != FAIL) {
       FreeWild(num_matches, matches);
     }
+    xfree(allocated_arg);
     return;
   }
 
@@ -152,7 +170,7 @@ void ex_help(exarg_T *eap)
       // There is no help window yet.
       // Try to open the file specified by the "helpfile" option.
       if ((helpfd = os_fopen(p_hf, READBIN)) == NULL) {
-        smsg(0, _("Sorry, help file \"%s\" not found"), p_hf);
+        smsg(0, _("Help file \"%s\" not found"), p_hf);
         goto erret;
       }
       fclose(helpfd);
@@ -194,7 +212,7 @@ void ex_help(exarg_T *eap)
   // It is needed for do_tag top open folds under the cursor.
   KeyTyped = old_KeyTyped;
 
-  do_tag(tag, DT_HELP, 1, false, true);
+  do_tag(NULL, tag, DT_HELP, 1, false, true);
 
   // Delete the empty buffer if we're not using it.  Careful: autocommands
   // may have jumped to another window, check that the buffer is not in a
@@ -214,6 +232,7 @@ void ex_help(exarg_T *eap)
 
 erret:
   xfree(tag);
+  xfree(allocated_arg);
 }
 
 /// ":helpclose": Close one help window
@@ -315,24 +334,18 @@ static int help_compare(const void *s1, const void *s2)
 /// When "keep_lang" is true try keeping the language of the current buffer.
 int find_help_tags(const char *arg, int *num_matches, char ***matches, bool keep_lang)
 {
-  Error err = ERROR_INIT;
-  MAXSIZE_TEMP_ARRAY(args, 1);
-
-  ADD_C(args, CSTR_AS_OBJ(arg));
-
-  Object res = NLUA_EXEC_STATIC("return require'vim._core.help'.escape_subject(...)",
-                                args, kRetObject, NULL, &err);
-
-  if (ERROR_SET(&err)) {
-    emsg_multiline(err.msg, "lua_error", HLF_E, true);
-    api_clear_error(&err);
+  typval_T tv_args[] = {
+    { .v_type = VAR_STRING, .vval.v_string = (char *)arg },
+    { .v_type = VAR_UNKNOWN },
+  };
+  typval_T rettv;
+  nlua_call_typval("vim._core.help", "escape_subject", tv_args, &rettv);
+  if (rettv.v_type != VAR_STRING || rettv.vval.v_string == NULL) {
+    tv_clear(&rettv);
     return FAIL;
   }
-  api_clear_error(&err);
-
-  assert(res.type == kObjectTypeString);
-  xstrlcpy(IObuff, res.data.string.data, sizeof(IObuff));
-  api_free_object(res);
+  xstrlcpy(IObuff, rettv.vval.v_string, sizeof(IObuff));
+  tv_clear(&rettv);
 
   *matches = NULL;
   *num_matches = 0;
@@ -410,7 +423,7 @@ void cleanup_help_tags(int num_file, char **file)
 void prepare_help_buffer(void)
 {
   curbuf->b_help = true;
-  set_option_direct(kOptBuftype, STATIC_CSTR_AS_OPTVAL("help"), OPT_LOCAL, 0);
+  set_option_direct(kOptBuftype, STATIC_CSTR_AS_OBJ("help"), OPT_LOCAL, 0);
 
   // Always set these options after jumping to a help tag, because the
   // user may have an autocommand that gets in the way.
@@ -419,13 +432,13 @@ void prepare_help_buffer(void)
   // Only set it when needed, buf_init_chartab() is some work.
   char *p = "!-~,^*,^|,^\",192-255";
   if (strcmp(curbuf->b_p_isk, p) != 0) {
-    set_option_direct(kOptIskeyword, CSTR_AS_OPTVAL(p), OPT_LOCAL, 0);
+    set_option_direct(kOptIskeyword, CSTR_AS_OBJ(p), OPT_LOCAL, 0);
     check_buf_options(curbuf);
     buf_init_chartab(curbuf, false);
   }
 
   // Don't use the global foldmethod.
-  set_option_direct(kOptFoldmethod, STATIC_CSTR_AS_OPTVAL("manual"), OPT_LOCAL, 0);
+  set_option_direct(kOptFoldmethod, STATIC_CSTR_AS_OBJ("manual"), OPT_LOCAL, 0);
 
   curbuf->b_p_ts = 8;         // 'tabstop' is 8.
   curwin->w_p_list = false;   // No list mode.
@@ -447,14 +460,8 @@ void prepare_help_buffer(void)
 /// Populate *local-additions* in help.txt
 void get_local_additions(void)
 {
-  Error err = ERROR_INIT;
-  Object res = NLUA_EXEC_STATIC("return require'vim._core.help'.local_additions()",
-                                (Array)ARRAY_DICT_INIT, kRetNilBool, NULL, &err);
-  if (ERROR_SET(&err)) {
-    emsg_multiline(err.msg, "lua_error", HLF_E, true);
-  }
-  api_free_object(res);
-  api_clear_error(&err);
+  typval_T no_args[] = { { .v_type = VAR_UNKNOWN } };
+  nlua_call_typval("vim._core.help", "local_additions", no_args, NULL);
 }
 
 /// ":exusage"

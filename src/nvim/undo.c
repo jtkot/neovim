@@ -88,9 +88,9 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/buffer_updates.h"
 #include "nvim/change.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval/funcs.h"
 #include "nvim/eval/typval.h"
@@ -103,10 +103,11 @@
 #include "nvim/fold.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mark.h"
 #include "nvim/mark_defs.h"
@@ -158,7 +159,7 @@ static bool undo_undoes = false;
 
 static int lastmark = 0;
 
-#if defined(U_DEBUG)
+#ifdef U_DEBUG
 // Check the undo structures for being valid.  Print a warning when something
 // looks wrong.
 static int seen_b_u_curhead;
@@ -382,7 +383,7 @@ int u_savecommon(buf_T *buf, linenr_T top, linenr_T bot, linenr_T newbot, bool r
   u_entry_T *prev_uep;
   linenr_T size = bot - top - 1;
 
-  // If buf->b_u_synced == true make a new header.
+  // If buf->b_u_synced is true make a new header.
   if (buf->b_u_synced) {
     // Need to create new entry in b_changelist.
     buf->b_new_change = true;
@@ -688,9 +689,10 @@ char *u_get_undo_file_name(const char *const buf_ffname, const bool reading)
 #endif
 
   char dir_name[MAXPATHL + 1];
-  char *munged_name = NULL;
+  String munged_name = STRING_INIT;
   char *undo_file_name = NULL;
 
+  const size_t ffname_len = strlen(ffname);
   // Loop over 'undodir'.  When reading find the first file that exists.
   // When not reading use the first directory that exists or ".".
   char *dirp = p_udir;
@@ -699,11 +701,10 @@ char *u_get_undo_file_name(const char *const buf_ffname, const bool reading)
     if (dir_len == 1 && dir_name[0] == '.') {
       // Use same directory as the ffname,
       // "dir/name" -> "dir/.name.un~"
-      const size_t ffname_len = strlen(ffname);
       undo_file_name = xmalloc(ffname_len + 6);
       memmove(undo_file_name, ffname, ffname_len + 1);
       char *const tail = path_tail(undo_file_name);
-      const size_t tail_len = strlen(tail);
+      const size_t tail_len = ffname_len - (size_t)(tail - undo_file_name);
       memmove(tail + 1, tail, tail_len + 1);
       *tail = '.';
       memmove(tail + tail_len + 1, ".un~", sizeof(".un~"));
@@ -711,9 +712,8 @@ char *u_get_undo_file_name(const char *const buf_ffname, const bool reading)
       dir_name[dir_len] = NUL;
 
       // Remove trailing pathseps from directory name
-      char *p = &dir_name[dir_len - 1];
-      while (vim_ispathsep(*p)) {
-        *p-- = NUL;
+      while (dir_len > 1 && vim_ispathsep_nocolon(dir_name[dir_len - 1])) {
+        dir_name[--dir_len] = NUL;
       }
 
       bool has_directory = os_isdir(dir_name);
@@ -730,15 +730,16 @@ char *u_get_undo_file_name(const char *const buf_ffname, const bool reading)
         }
       }
       if (has_directory) {
-        if (munged_name == NULL) {
-          munged_name = xstrdup(ffname);
-          for (char *c = munged_name; *c != NUL; MB_PTR_ADV(c)) {
-            if (vim_ispathsep(*c)) {
-              *c = '%';
+        if (munged_name.data == NULL) {
+          munged_name = cbuf_to_string(ffname, ffname_len);
+          for (char *p = munged_name.data; *p != NUL; MB_PTR_ADV(p)) {
+            if (vim_ispathsep(*p)) {
+              *p = '%';
             }
           }
         }
-        undo_file_name = concat_fnames(dir_name, munged_name, true);
+        undo_file_name = concat_fnames(cbuf_as_string(dir_name, dir_len),
+                                       munged_name, true).data;
       }
     }
 
@@ -750,7 +751,7 @@ char *u_get_undo_file_name(const char *const buf_ffname, const bool reading)
     XFREE_CLEAR(undo_file_name);
   }
 
-  xfree(munged_name);
+  xfree(munged_name.data);
   return undo_file_name;
 }
 
@@ -1565,36 +1566,48 @@ void u_read_undo(char *name, const uint8_t *hash, const char *orig_name FUNC_ATT
         goto error;
       }
     }
-    for (int j = 0; j < num_head; j++) {
-      if (uhp_table[j] != NULL
-          && uhp_table[j]->uh_seq == uhp->uh_next.seq) {
-        uhp->uh_next.ptr = uhp_table[j];
-        SET_FLAG(j);
-        break;
+    {
+      const int seq = uhp->uh_next.seq;
+      uhp->uh_next.ptr = NULL;
+      for (int j = 0; j < num_head; j++) {
+        if (uhp_table[j] != NULL && i != j && uhp_table[j]->uh_seq == seq) {
+          uhp->uh_next.ptr = uhp_table[j];
+          SET_FLAG(j);
+          break;
+        }
       }
     }
-    for (int j = 0; j < num_head; j++) {
-      if (uhp_table[j] != NULL
-          && uhp_table[j]->uh_seq == uhp->uh_prev.seq) {
-        uhp->uh_prev.ptr = uhp_table[j];
-        SET_FLAG(j);
-        break;
+    {
+      const int seq = uhp->uh_prev.seq;
+      uhp->uh_prev.ptr = NULL;
+      for (int j = 0; j < num_head; j++) {
+        if (uhp_table[j] != NULL && i != j && uhp_table[j]->uh_seq == seq) {
+          uhp->uh_prev.ptr = uhp_table[j];
+          SET_FLAG(j);
+          break;
+        }
       }
     }
-    for (int j = 0; j < num_head; j++) {
-      if (uhp_table[j] != NULL
-          && uhp_table[j]->uh_seq == uhp->uh_alt_next.seq) {
-        uhp->uh_alt_next.ptr = uhp_table[j];
-        SET_FLAG(j);
-        break;
+    {
+      const int seq = uhp->uh_alt_next.seq;
+      uhp->uh_alt_next.ptr = NULL;
+      for (int j = 0; j < num_head; j++) {
+        if (uhp_table[j] != NULL && i != j && uhp_table[j]->uh_seq == seq) {
+          uhp->uh_alt_next.ptr = uhp_table[j];
+          SET_FLAG(j);
+          break;
+        }
       }
     }
-    for (int j = 0; j < num_head; j++) {
-      if (uhp_table[j] != NULL
-          && uhp_table[j]->uh_seq == uhp->uh_alt_prev.seq) {
-        uhp->uh_alt_prev.ptr = uhp_table[j];
-        SET_FLAG(j);
-        break;
+    {
+      const int seq = uhp->uh_alt_prev.seq;
+      uhp->uh_alt_prev.ptr = NULL;
+      for (int j = 0; j < num_head; j++) {
+        if (uhp_table[j] != NULL && i != j && uhp_table[j]->uh_seq == seq) {
+          uhp->uh_alt_prev.ptr = uhp_table[j];
+          SET_FLAG(j);
+          break;
+        }
       }
     }
     if (old_header_seq > 0 && old_idx < 0 && uhp->uh_seq == old_header_seq) {
@@ -1772,12 +1785,12 @@ void u_undo(int count)
   // If we get an undo command while executing a macro, we behave like the
   // original vi. If this happens twice in one macro the result will not
   // be compatible.
-  if (curbuf->b_u_synced == false) {
+  if (!curbuf->b_u_synced) {
     u_sync(true);
     count = 1;
   }
 
-  if (vim_strchr(p_cpo, CPO_UNDO) == NULL) {
+  if (vim_strchr(p_cpo, kCpoUndo) == NULL) {
     undo_undoes = true;
   } else {
     undo_undoes = !undo_undoes;
@@ -1789,7 +1802,7 @@ void u_undo(int count)
 /// If 'cpoptions' does not contain 'u': Always redo.
 void u_redo(int count)
 {
-  if (vim_strchr(p_cpo, CPO_UNDO) == NULL) {
+  if (vim_strchr(p_cpo, kCpoUndo) == NULL) {
     undo_undoes = false;
   }
 
@@ -1880,7 +1893,9 @@ static void u_doit(int startcount, bool quiet, bool do_buf_event)
         curbuf->b_u_curhead = curbuf->b_u_oldhead;
         beep_flush();
         if (count == startcount - 1) {
-          msg(_("Already at oldest change"), 0);
+          if (!shortmess(kShmUndo)) {
+            msg(_("Already at oldest change"), 0);
+          }
           return;
         }
         break;
@@ -1891,7 +1906,9 @@ static void u_doit(int startcount, bool quiet, bool do_buf_event)
       if (curbuf->b_u_curhead == NULL || get_undolevel(curbuf) <= 0) {
         beep_flush();  // nothing to redo
         if (count == startcount - 1) {
-          msg(_("Already at newest change"), 0);
+          if (!shortmess(kShmUndo)) {
+            msg(_("Already at newest change"), 0);
+          }
           return;
         }
         break;
@@ -1925,7 +1942,7 @@ void undo_time(int step, bool sec, bool file, bool absolute)
   }
 
   // First make sure the current undoable change is synced.
-  if (curbuf->b_u_synced == false) {
+  if (!curbuf->b_u_synced) {
     u_sync(true);
   }
 
@@ -2112,10 +2129,12 @@ void undo_time(int step, bool sec, bool file, bool absolute)
     }
 
     if (closest == closest_start) {
-      if (step < 0) {
-        msg(_("Already at oldest change"), 0);
-      } else {
-        msg(_("Already at newest change"), 0);
+      if (!shortmess(kShmUndo)) {
+        if (step < 0) {
+          msg(_("Already at oldest change"), 0);
+        } else {
+          msg(_("Already at newest change"), 0);
+        }
       }
       return;
     }
@@ -2545,7 +2564,8 @@ static void u_undo_end(bool did_undo, bool absolute, bool quiet)
 
   if (quiet
       || global_busy        // no messages until global is finished
-      || !messaging()) {    // 'lazyredraw' set, don't do messages now
+      || !messaging()       // 'lazyredraw' set, don't do messages now
+      || shortmess(kShmUndo)) {
     return;
   }
 
@@ -2602,8 +2622,8 @@ static void u_undo_end(bool did_undo, bool absolute, bool quiet)
     }
   }
 
-  if (VIsual_active) {
-    check_pos(curbuf, &VIsual);
+  if (Visual.active) {
+    check_pos(curbuf, &Visual.start);
   }
 
   smsg_keep(0, _("%" PRId64 " %s; %s #%" PRId64 "  %s"),
@@ -3090,6 +3110,8 @@ static char *u_save_line_buf(buf_T *buf, linenr_T lnum)
 /// Check if the 'modified' flag is set, or 'ff' has changed (only need to
 /// check the first character, because it can only be "dos", "unix" or "mac").
 /// "nofile" and "scratch" type buffers are considered to always be unchanged.
+/// Prompt buffers ignore implicit modifications by default, but an explicit
+/// ":set modified" still makes them count as changed.
 ///
 /// @param buf The buffer to check
 ///
@@ -3097,10 +3119,10 @@ static char *u_save_line_buf(buf_T *buf, linenr_T lnum)
 bool bufIsChanged(buf_T *buf)
   FUNC_ATTR_NONNULL_ALL FUNC_ATTR_WARN_UNUSED_RESULT
 {
-  // In a "prompt" buffer we do respect 'modified', so that we can control
-  // closing the window by setting or resetting that option.
-  return (!bt_dontwrite(buf) || bt_prompt(buf))
-         && (buf->b_changed || file_ff_differs(buf, true));
+  // In a "prompt" buffer we respect 'modified' if the user or a plugin explicitly set it.
+  return bt_prompt(buf)
+         ? buf->b_modified_was_set
+         : (!bt_dontwrite(buf) && (buf->b_changed || file_ff_differs(buf, true)));
 }
 
 // Return true if any buffer has changes.  Also buffers that are not written.
@@ -3226,4 +3248,79 @@ u_header_T *u_force_get_undo_header(buf_T *buf)
     }
   }
   return uhp;
+}
+
+/// Checkpoints the undo state of `buf` and detaches its undotree: subsequent edits build
+/// a disposable tree. Then u_rollback() can revert them without a trace ("undo-invisible"
+/// speculative edits, e.g. 'inccommand' preview). Sets 'undolevels' so every edit stays undoable.
+void u_checkpoint(UndoCheckpoint *uc, buf_T *buf)
+  FUNC_ATTR_NONNULL_ALL
+{
+  uc->uc_synced = buf->b_u_synced;
+  uc->uc_oldhead = buf->b_u_oldhead;
+  uc->uc_newhead = buf->b_u_newhead;
+  uc->uc_curhead = buf->b_u_curhead;
+  uc->uc_numhead = buf->b_u_numhead;
+  uc->uc_seq_last = buf->b_u_seq_last;
+  uc->uc_save_nr_last = buf->b_u_save_nr_last;
+  uc->uc_seq_cur = buf->b_u_seq_cur;
+  uc->uc_time_cur = buf->b_u_time_cur;
+  uc->uc_save_nr_cur = buf->b_u_save_nr_cur;
+  uc->uc_line_ptr = buf->b_u_line_ptr;
+  uc->uc_line_lnum = buf->b_u_line_lnum;
+  uc->uc_line_colnr = buf->b_u_line_colnr;
+  uc->uc_undolevels = buf->b_p_ul;
+  uc->uc_changedtick = buf_get_changedtick(buf);
+
+  u_clearall(buf);
+  buf->b_p_ul = INT_MAX;  // Make sure we can undo all changes
+}
+
+/// Reverts `buf` from a checkpoint: drops all edits made since u_checkpoint(), and reattaches the
+/// checkpointed undotree. Also restores b:changedtick and 'undolevels'.
+void u_rollback(UndoCheckpoint *uc, buf_T *buf)
+  FUNC_ATTR_NONNULL_ALL
+{
+  if (buf->b_u_seq_cur != uc->uc_seq_cur) {
+    int count = 0;
+
+    // Calculate how many undo steps are necessary to restore earlier state.
+    for (u_header_T *uhp = buf->b_u_curhead ? buf->b_u_curhead : buf->b_u_newhead;
+         uhp != NULL;
+         uhp = uhp->uh_next.ptr, ++count) {}
+
+    CtxSwitch cs = { 0 };
+    ctx_switch(&cs, NULL, NULL, buf, 0);
+    // Ensure all the entries will be undone
+    if (curbuf->b_u_synced == false) {
+      u_sync(true);
+    }
+    // Undo invisibly. This also moves the cursor!
+    if (!u_undo_and_forget(count, false)) {
+      abort();
+    }
+    ctx_restore(&cs);
+  }
+
+  u_blockfree(buf);
+  buf->b_u_oldhead = uc->uc_oldhead;
+  buf->b_u_newhead = uc->uc_newhead;
+  buf->b_u_curhead = uc->uc_curhead;
+  buf->b_u_numhead = uc->uc_numhead;
+  buf->b_u_seq_last = uc->uc_seq_last;
+  buf->b_u_save_nr_last = uc->uc_save_nr_last;
+  buf->b_u_seq_cur = uc->uc_seq_cur;
+  buf->b_u_time_cur = uc->uc_time_cur;
+  buf->b_u_save_nr_cur = uc->uc_save_nr_cur;
+  buf->b_u_line_ptr = uc->uc_line_ptr;
+  buf->b_u_line_lnum = uc->uc_line_lnum;
+  buf->b_u_line_colnr = uc->uc_line_colnr;
+  if (buf->b_u_curhead == NULL) {
+    buf->b_u_synced = uc->uc_synced;
+  }
+
+  if (uc->uc_changedtick != buf_get_changedtick(buf)) {
+    buf_set_changedtick(buf, uc->uc_changedtick);
+  }
+  buf->b_p_ul = uc->uc_undolevels;  // Restore 'undolevels'
 }

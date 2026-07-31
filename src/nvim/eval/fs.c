@@ -42,6 +42,7 @@
 #include "nvim/os/os.h"
 #include "nvim/path.h"
 #include "nvim/pos_defs.h"
+#include "nvim/runtime.h"
 #include "nvim/strings.h"
 #include "nvim/types_defs.h"
 #include "nvim/vim_defs.h"
@@ -63,14 +64,16 @@ static const char e_error_while_writing_str[] = N_("E80: Error while writing: %s
 /// @param fnamep  file name so far
 /// @param bufp  buffer for allocated file name or NULL
 /// @param fnamelen  length of fnamep
+/// @param use_shellslash adjust separators in `*fnamep` according to 'shellslash'
 int modify_fname(char *src, bool tilde_file, size_t *usedlen, char **fnamep, char **bufp,
-                 size_t *fnamelen)
+                 size_t *fnamelen, bool use_shellslash)
 {
   int valid = 0;
   char *s, *p, *pbuf;
   char dirname[MAXPATHL];
   bool has_fullname = false;
   bool has_homerelative = false;
+  bool didit = false;
 
 repeat:
   // ":p" - full path/file_name
@@ -82,7 +85,7 @@ repeat:
 
     // Expand "~/path" for all systems and "~user/path" for Unix
     if ((*fnamep)[0] == '~'
-#if !defined(UNIX)
+#ifndef UNIX
         && ((*fnamep)[1] == '/'
 # ifdef BACKSLASH_IN_FILENAME
             || (*fnamep)[1] == '\\'
@@ -160,19 +163,24 @@ repeat:
     has_fullname = false;
 
     if (p != NULL) {
+      size_t dirnamelen = 0;
+
       if (c == '.') {
         os_dirname(dirname, MAXPATHL);
         if (has_homerelative) {
           s = xstrdup(dirname);
-          home_replace(NULL, s, dirname, MAXPATHL, true);
+          dirnamelen = home_replace(NULL, s, dirname, MAXPATHL, true);
           xfree(s);
         }
-        size_t namelen = strlen(dirname);
+
+        if (dirnamelen == 0) {
+          dirnamelen = strlen(dirname);
+        }
 
         // Do not call shorten_fname() here since it removes the prefix
         // even though the path does not have a prefix.
-        if (path_fnamencmp(p, dirname, namelen) == 0) {
-          p += namelen;
+        if (path_fnamencmp(p, dirname, dirnamelen) == 0) {
+          p += dirnamelen;
           if (vim_ispathsep(*p)) {
             while (*p && vim_ispathsep(*p)) {
               p++;
@@ -187,10 +195,10 @@ repeat:
           }
         }
       } else {
-        home_replace(NULL, p, dirname, MAXPATHL, true);
+        dirnamelen = home_replace(NULL, p, dirname, MAXPATHL, true);
         // Only replace it when it starts with '~'
         if (*dirname == '~') {
-          s = xstrdup(dirname);
+          s = xmemdupz(dirname, dirnamelen);
           assert(s != NULL);  // suppress clang "Argument with 'nonnull' attribute passed null"
           *fnamep = s;
           xfree(*bufp);
@@ -202,23 +210,30 @@ repeat:
     }
   }
 
+  FileInfo file_info;
+  os_fileinfo2(*fnamep, &file_info);
+  if (src[*usedlen] == ':' && src[*usedlen + 1] == 'h') {
+    s = *fnamep + file_info.rest_off;
+    *fnamep = *fnamep + file_info.prefix_off;
+  }
+
   char *tail = path_tail(*fnamep);
   *fnamelen = strlen(*fnamep);
 
   // ":h" - head, remove "/file_name", can be repeated
-  // Don't remove the first "/" or "c:\"
+  // Don't remove the logical root, see `FileInfo`.
   while (src[*usedlen] == ':' && src[*usedlen + 1] == 'h') {
     valid |= VALID_HEAD;
     *usedlen += 2;
-    s = get_past_head(*fnamep);
     while (tail > s && after_pathsep(s, tail)) {
       MB_PTR_BACK(*fnamep, tail);
     }
-    *fnamelen = (size_t)(tail - *fnamep);
+    *fnamelen = tail <= s ? (size_t)(s - *fnamep) : (size_t)(tail - *fnamep);
     if (*fnamelen == 0) {
       // Result is empty.  Turn it into "." to make ":cd %:h" work.
       xfree(*bufp);
       *bufp = *fnamep = tail = xstrdup(".");
+      s = *fnamep;  // s pointed into the freed buffer.
       *fnamelen = 1;
     } else {
       while (tail > s && !after_pathsep(s, tail)) {
@@ -291,13 +306,20 @@ repeat:
     *usedlen += 2;
   }
 
+#ifdef BACKSLASH_IN_FILENAME
+  if (!didit && use_shellslash && *fnamep != NULL) {
+    *fnamep = xstrdup(*fnamep);
+    slash_adjust(*fnamep);
+    xfree(*bufp);
+    *bufp = *fnamep;
+  }
+#endif
+
   // ":s?pat?foo?" - substitute
   // ":gs?pat?foo?" - global substitute
   if (src[*usedlen] == ':'
       && (src[*usedlen + 1] == 's'
           || (src[*usedlen + 1] == 'g' && src[*usedlen + 2] == 's'))) {
-    bool didit = false;
-
     char *flags = "";
     s = src + *usedlen + 2;
     if (src[*usedlen + 1] == 'g') {
@@ -361,6 +383,10 @@ void f_chdir(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
   rettv->v_type = VAR_STRING;
   rettv->vval.v_string = NULL;
+
+  if (check_secure()) {
+    return;
+  }
 
   if (argvars[0].v_type != VAR_STRING) {
     // Returning an empty string means it failed.
@@ -596,11 +622,13 @@ void f_fnamemodify(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   if (mods == NULL || fname == NULL) {
     fname = NULL;
   } else {
+    fbuf = TO_SLASH_SAVE(fname);
+    fname = fbuf;
     len = strlen(fname);
     if (*mods != NUL) {
       size_t usedlen = 0;
       modify_fname((char *)mods, false, &usedlen,
-                   (char **)&fname, &fbuf, &len);
+                   (char **)&fname, &fbuf, &len, false);
     }
   }
 
@@ -759,8 +787,6 @@ void f_getfsize(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
   const char *fname = tv_get_string(&argvars[0]);
 
-  rettv->v_type = VAR_NUMBER;
-
   FileInfo file_info;
   if (os_fileinfo(fname, &file_info)) {
     uint64_t filesize = os_fileinfo_size(&file_info);
@@ -877,7 +903,7 @@ void f_glob(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 /// "globpath()" function
 void f_globpath(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
-  int flags = WILD_IGNORE_COMPLETESLASH;  // Flags for globpath.
+  int flags = 0;  // Flags for globpath.
   bool error = false;
 
   // Return a string, or a list if the optional third argument is non-zero.
@@ -1180,6 +1206,9 @@ theend:
 void f_readdir(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
   tv_list_alloc_ret(rettv, kListLenUnknown);
+  if (check_secure()) {
+    return;
+  }
 
   const char *path = tv_get_string(&argvars[0]);
   typval_T *expr = &argvars[1];
@@ -1450,12 +1479,20 @@ static void read_file_or_blob(typval_T *argvars, typval_T *rettv, bool always_bl
 /// "readblob()" function
 void f_readblob(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
+  if (check_secure()) {
+    return;
+  }
+
   read_file_or_blob(argvars, rettv, true);
 }
 
 /// "readfile()" function
 void f_readfile(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
+  if (check_secure()) {
+    return;
+  }
+
   read_file_or_blob(argvars, rettv, false);
 }
 
@@ -1716,13 +1753,12 @@ write_list_error:
 /// @param[in]  blob  Blob to write.
 ///
 /// @return true on success, or false on failure.
-static bool write_blob(FileDescriptor *const fp, const blob_T *const blob)
+static bool write_data(FileDescriptor *const fp, const char *const data, const size_t len)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   int error = 0;
-  const int len = tv_blob_len(blob);
   if (len > 0) {
-    const ptrdiff_t written = file_write(fp, blob->bv_ga.ga_data, (size_t)len);
+    const ptrdiff_t written = file_write(fp, data, len);
     if (written < (ptrdiff_t)len) {
       error = (int)written;
       goto write_blob_error;
@@ -1738,6 +1774,18 @@ write_blob_error:
   return false;
 }
 
+static bool write_blob(FileDescriptor *const fp, const blob_T *const blob)
+  FUNC_ATTR_NONNULL_ALL
+{
+  return write_data(fp, blob->bv_ga.ga_data, (size_t)tv_blob_len(blob));
+}
+
+static bool write_string(FileDescriptor *const fp, const char *const data)
+  FUNC_ATTR_NONNULL_ALL
+{
+  return write_data(fp, data, strlen(data));
+}
+
 /// "writefile()" function
 void f_writefile(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
@@ -1747,15 +1795,22 @@ void f_writefile(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
     return;
   }
 
+  // XXX: this logic is bit weird because of how `decode_string` works: #39328
+  // - if decode_string finds NUL in the Lua string, it assigns VAR_BLOB
+  // - else it assigns VAR_STRING
+
   if (argvars[0].v_type == VAR_LIST) {
     TV_LIST_ITER_CONST(argvars[0].vval.v_list, li, {
       if (!tv_check_str_or_nr(TV_LIST_ITEM_TV(li))) {
         return;
       }
     });
-  } else if (argvars[0].v_type != VAR_BLOB) {
-    semsg(_(e_invarg2),
-          _("writefile() first argument must be a List or a Blob"));
+  } else if (argvars[0].v_type != VAR_BLOB
+             // Always treat Lua/RPC strings as "blob" data.
+             && !(argvars[0].v_type == VAR_STRING
+                  && (script_is_lua(current_sctx.sc_sid)
+                      || current_sctx.sc_sid == SID_API_CLIENT))) {
+    semsg(_(e_invarg2), _("writefile() first argument must be a List or a Blob"));
     return;
   }
 
@@ -1822,7 +1877,9 @@ void f_writefile(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 
     bool write_ok;
     if (argvars[0].v_type == VAR_BLOB) {
-      write_ok = write_blob(&fp, argvars[0].vval.v_blob);
+      write_ok = argvars[0].vval.v_blob == NULL || write_blob(&fp, argvars[0].vval.v_blob);
+    } else if (argvars[0].v_type == VAR_STRING) {
+      write_ok = write_string(&fp, argvars[0].vval.v_string);
     } else {
       write_ok = write_list(&fp, argvars[0].vval.v_list, binary);
     }

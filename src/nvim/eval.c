@@ -20,12 +20,13 @@
 #include "nvim/channel.h"
 #include "nvim/charset.h"
 #include "nvim/cmdexpand_defs.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/encode.h"
 #include "nvim/eval/executor.h"
+#include "nvim/eval/funcs.h"
 #include "nvim/eval/gc.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/userfunc.h"
@@ -43,6 +44,7 @@
 #include "nvim/globals.h"
 #include "nvim/hashtab.h"
 #include "nvim/highlight_group.h"
+#include "nvim/insert.h"
 #include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/lib/queue_defs.h"
@@ -79,6 +81,7 @@
 #include "nvim/strings.h"
 #include "nvim/tag.h"
 #include "nvim/types_defs.h"
+#include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/vim_defs.h"
 #include "nvim/window.h"
@@ -205,14 +208,12 @@ void eval_init(void)
   func_init();
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 void eval_clear(void)
 {
   evalvars_clear();
   free_scriptnames();  // must come after evalvars_clear().
-# ifdef HAVE_WORKING_LIBINTL
   free_locales();
-# endif
 
   // autoloaded script names
   free_autoload_scriptnames();
@@ -234,7 +235,7 @@ void fill_evalarg_from_eap(evalarg_T *evalarg, exarg_T *eap, bool skip)
     return;
   }
 
-  if (sourcing_a_script(eap)) {
+  if (sourcing_a_script(eap) || eap->ea_getline == get_list_line) {
     evalarg->eval_getline = eap->ea_getline;
     evalarg->eval_cookie = eap->cookie;
   }
@@ -2267,6 +2268,23 @@ static int eval_addlist(typval_T *tv1, typval_T *tv2)
   return OK;
 }
 
+/// Append string "s2" to the string in "tv1".
+/// Returns OK if "tv1" was grown in place, FAIL otherwise.
+int grow_string_tv(typval_T *tv1, const char *s2)
+{
+  if (tv1->v_type != VAR_STRING || tv1->vval.v_string == NULL) {
+    return FAIL;
+  }
+
+  size_t len1 = strlen(tv1->vval.v_string);
+  size_t len2 = strlen(s2);
+  char *p = xrealloc(tv1->vval.v_string, len1 + len2 + 1);
+
+  memmove(p + len1, s2, len2 + 1);
+  tv1->vval.v_string = p;
+  return OK;
+}
+
 /// Concatenate strings "tv1" and "tv2" and store the result in "tv1".
 static int eval_concat_str(typval_T *tv1, typval_T *tv2)
 {
@@ -2279,6 +2297,11 @@ static int eval_concat_str(typval_T *tv1, typval_T *tv2)
     tv_clear(tv1);
     tv_clear(tv2);
     return FAIL;
+  }
+
+  // When possible, grow the existing string in place to avoid alloc/free.
+  if (grow_string_tv(tv1, s2) == OK) {
+    return OK;
   }
 
   char *p = concat_str(s1, s2);
@@ -3382,10 +3405,10 @@ int eval_option(const char **const arg, typval_T *const rettv, const bool evalua
 
     ret = FAIL;
   } else if (rettv != NULL) {
-    OptVal value = is_tty_opt ? get_tty_option(*arg) : get_option_value(opt_idx, opt_flags);
-    assert(value.type != kOptValTypeNil);
+    Object value = is_tty_opt ? get_tty_option(*arg) : get_option_value(opt_idx, opt_flags);
+    assert(value.type != kObjectTypeNil);
 
-    *rettv = optval_as_tv(value, true);
+    *rettv = opt_to_tv(value, true);
   } else if (working && !is_tty_opt && is_option_hidden(opt_idx)) {
     ret = FAIL;
   }
@@ -4048,9 +4071,9 @@ bool garbage_collect(bool testing)
     ABORTING(set_ref_in_item)(&wp->w_winvar.di_tv, copyID, NULL, NULL);
   }
   // window-local variables in autocmd windows
-  for (int i = 0; i < AUCMD_WIN_COUNT; i++) {
-    if (aucmd_win[i].auc_win != NULL) {
-      ABORTING(set_ref_in_item)(&aucmd_win[i].auc_win->w_winvar.di_tv, copyID, NULL, NULL);
+  for (int i = 0; i < CTX_WIN_COUNT; i++) {
+    if (ctx_win[i].cw_win != NULL) {
+      ABORTING(set_ref_in_item)(&ctx_win[i].cw_win->w_winvar.di_tv, copyID, NULL, NULL);
     }
   }
 
@@ -4999,7 +5022,6 @@ void timer_due_cb(TimeWatcher *tw, void *data)
   timer_T *timer = (timer_T *)data;
   int save_did_emsg = did_emsg;
   const int called_emsg_before = called_emsg;
-  const bool save_ex_pressedreturn = get_pressedreturn();
 
   if (timer->stopped || timer->paused) {
     return;
@@ -5026,7 +5048,6 @@ void timer_due_cb(TimeWatcher *tw, void *data)
     }
   }
   did_emsg = save_did_emsg;
-  set_pressedreturn(save_ex_pressedreturn);
 
   if (timer->emsg_count >= 3) {
     timer_stop(timer);
@@ -5345,8 +5366,8 @@ pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret
     pos = wp->w_cursor;
   } else if (name[0] == 'v' && name[1] == NUL) {
     // Visual start
-    if (VIsual_active && wp == curwin) {
-      pos = VIsual;
+    if (Visual.active && wp == curwin) {
+      pos = Visual.start;
     } else {
       pos = wp->w_cursor;
     }
@@ -6138,6 +6159,8 @@ void ex_echo(exarg_T *eap)
     if (!eap->skip) {
       if (atstart) {
         atstart = false;
+        msg_ext_set_append(eap->cmdidx == CMD_echon);
+        msg_ext_no_fast();
         msg_ext_set_kind("echo");
         // Call msg_start() after eval1(), evaluating the expression
         // may cause a message to appear.
@@ -6154,7 +6177,6 @@ void ex_echo(exarg_T *eap)
         msg_puts_hl(" ", echo_hl_id, false);
       }
       char *tofree = encode_tv2echo(&rettv, NULL);
-      msg_ext_append = eap->cmdidx == CMD_echon;
       msg_multiline(cstr_as_string(tofree), echo_hl_id, true, false, &need_clear);
       xfree(tofree);
     }
@@ -6163,12 +6185,15 @@ void ex_echo(exarg_T *eap)
   }
   eap->nextcmd = check_nextcmd(arg);
   clear_evalarg(&evalarg, eap);
+  msg_ext_set_append(false);
 
   if (eap->skip) {
     emsg_skip--;
   } else {
     // remove text that may still be there from the command
-    if (need_clear) {
+    if (ui_has(kUIMessages) && (*eap->arg == NUL || *eap->arg == '|' || *eap->arg == '\n')) {
+      msg_puts_len("", 0, 0, false);  // emit "empty" kind msg_show
+    } else if (need_clear) {
       msg_clr_eos();
     }
     if (eap->cmdidx == CMD_echo) {
@@ -6236,11 +6261,13 @@ void ex_execute(exarg_T *eap)
 
   if (ret != FAIL && ga.ga_data != NULL) {
     if (eap->cmdidx == CMD_echomsg) {
+      msg_ext_no_fast();
       msg_ext_set_kind("echomsg");
       msg(ga.ga_data, echo_hl_id);
     } else if (eap->cmdidx == CMD_echoerr) {
       // We don't want to abort following commands, restore did_emsg.
       int save_did_emsg = did_emsg;
+      msg_ext_no_fast();
       emsg_multiline(ga.ga_data, "echoerr", HLF_E, true);
       if (!force_abort) {
         did_emsg = save_did_emsg;
@@ -6432,7 +6459,7 @@ char *do_string_sub(char *str, size_t len, char *pat, char *sub, typval_T *expr,
     // If it's still empty it was changed and restored, need to restore in
     // the complicated way.
     if (*p_cpo == NUL) {
-      set_option_value_give_err(kOptCpoptions, CSTR_AS_OPTVAL(save_cpo), 0);
+      set_option_value_give_err(kOptCpoptions, CSTR_AS_OBJ(save_cpo), 0);
     }
     free_string_option(save_cpo);
   }
@@ -6661,6 +6688,40 @@ char *prompt_get_input(buf_T *buf)
   return full_text;
 }
 
+/// Trim lines above the prompt to enforce 'scrollback' limit
+void prompt_trim_scrollback(buf_T *buf)
+{
+  if (buf->b_p_scbk <= 0) {
+    return;
+  }
+
+  linenr_T prompt_line = buf->b_prompt_start.mark.lnum;
+  linenr_T above_prompt = prompt_line - 1;
+  if (above_prompt <= (linenr_T)buf->b_p_scbk) {
+    return;
+  }
+
+  linenr_T to_delete = above_prompt - (linenr_T)buf->b_p_scbk;
+  for (linenr_T i = 0; i < to_delete; i++) {
+    ml_delete_buf(buf, 1, false);
+  }
+  mark_adjust_buf(buf, 1, to_delete, MAXLNUM, -to_delete, true,
+                  kMarkAdjustNormal, kExtmarkUndo);
+  deleted_lines_buf(buf, 1, to_delete);
+
+  FOR_ALL_TAB_WINDOWS(tp, wp) {
+    if (wp->w_buffer == buf) {
+      wp->w_cursor.lnum = wp->w_cursor.lnum <= to_delete
+                          ? 1
+                          : wp->w_cursor.lnum - to_delete;
+      if (wp->w_cursor.lnum > wp->w_buffer->b_ml.ml_line_count) {
+        wp->w_cursor.lnum = wp->w_buffer->b_ml.ml_line_count;
+      }
+    }
+  }
+  check_cursor_col(curwin);
+}
+
 /// Invokes the user-defined callback defined for the current prompt-buffer.
 void prompt_invoke_callback(void)
 {
@@ -6700,6 +6761,9 @@ theend:
   u_clearallandblockfree(curbuf);
 
   curbuf->b_prompt_start.mark.lnum = curbuf->b_ml.ml_line_count;
+  curbuf->b_prompt_append_new_line = true;
+
+  prompt_trim_scrollback(curbuf);
 }
 
 /// @return  true when the interrupt callback was invoked.

@@ -64,6 +64,31 @@ function vim.deepcopy(orig, noref)
   return deepcopy(orig, not noref and {} or nil)
 end
 
+--- Returns a shallow copy of `orig`.
+---
+--- Non-table values are returned as-is. Table keys and values are copied by
+--- reference, and the original metatable is preserved. Use |vim.deepcopy()|
+--- for a recursive copy.
+---
+--- @nodoc
+--- @generic T
+--- @param orig T
+--- @return T
+function vim._copy(orig)
+  if type(orig) ~= 'table' then
+    return orig
+  end
+
+  --- @cast orig table<any,any>
+
+  local copy = {} --- @type table<any,any>
+  for k, v in pairs(orig) do
+    copy[k] = v
+  end
+
+  return setmetatable(copy, getmetatable(orig))
+end
+
 --- @class vim.gsplit.Opts
 --- @inlinedoc
 ---
@@ -286,7 +311,8 @@ end
 --- @class vim.tbl_contains.Opts
 --- @inlinedoc
 ---
---- `value` is a function reference to be checked (default false)
+--- `value` is a function reference to be checked
+--- (default: false)
 --- @field predicate? boolean
 
 --- Checks if a table contains a given value, specified either directly or via
@@ -351,22 +377,37 @@ end
 
 vim.list = {}
 
----TODO(ofseed): memoize, string value support, type alias.
 ---@generic T
----@param v T
----@param key? fun(v: T): any
----@return any
-local function key_fn(v, key)
-  return key and key(v) or v
+---@param key? string|fun(val: T): any
+---@return fun(v: T): any
+local function make_key_fn(key)
+  vim.validate('key', key, { 'string', 'function' }, true)
+
+  if not key then
+    return function(v)
+      return v
+    end
+  end
+
+  if type(key) == 'string' then
+    local field = key
+    ---@param v any
+    key = function(v)
+      return v and v[field]
+    end
+  end
+
+  return key
 end
 
---- Removes duplicate values from a list-like table in-place.
+--- Removes duplicate values from a |lua-list| in-place.
 ---
 --- Only the first occurrence of each value is kept.
 --- The operation is performed in-place and the input table is modified.
 ---
 --- Accepts an optional `key` argument, which if provided is called for each
 --- value in the list to compute a hash key for uniqueness comparison.
+--- If `key` is a string, it is used as the field name to index each value.
 --- This is useful for deduplicating table values or complex objects.
 --- If `key` returns `nil` for a value, that value will be considered unique,
 --- even if multiple values return `nil`.
@@ -379,17 +420,19 @@ end
 --- -- t is now {1, 2, 3}
 ---
 --- local t = { {id=1}, {id=2}, {id=1} }
---- vim.list.unique(t, function(x) return x.id end)
+--- vim.list.unique(t, 'id')
 --- -- t is now { {id=1}, {id=2} }
 --- ```
 ---
+--- @since 14
 --- @generic T
 --- @param t T[]
---- @param key? fun(x: T): any Optional hash function to determine uniqueness of values
+--- @param key? string|fun(x: T): any Optional field name or hash function to determine uniqueness of values
 --- @return T[] : The deduplicated list
 --- @see |Iter:unique()|
 function vim.list.unique(t, key)
   vim.validate('t', t, 'table')
+  local key_fn = make_key_fn(key)
   local seen = {} --- @type table<any,boolean>
 
   local finish = #t
@@ -397,7 +440,7 @@ function vim.list.unique(t, key)
   local j = 1
   for i = 1, finish do
     local v = t[i]
-    local vh = key_fn(v, key)
+    local vh = key_fn(v)
     if not seen[vh] then
       t[j] = v
       if vh ~= nil then
@@ -426,7 +469,8 @@ end
 ---@field hi? integer
 ---
 --- Optional, compare the return value instead of the {val} itself if provided.
----@field key? fun(val: any): any
+--- If a string, index each value by this field name.
+---@field key? string|fun(val: any): any
 ---
 --- Specifies the search variant.
 ---   - "lower": returns the first position
@@ -439,18 +483,18 @@ end
 ---@generic T
 ---@param t T[]
 ---@param val T
----@param key? fun(val: any): any
 ---@param lo integer
 ---@param hi integer
+---@param key_fn fun(val: any): any
 ---@return integer i in range such that `t[j]` < {val} for all j < i,
 ---                and `t[j]` >= {val} for all j >= i,
 ---                or return {hi} if no such index is found.
-local function lower_bound(t, val, lo, hi, key)
+local function lower_bound(t, val, lo, hi, key_fn)
   local bit = require('bit') -- Load bitop on demand
-  local val_key = key_fn(val, key)
+  local val_key = key_fn(val)
   while lo < hi do
     local mid = bit.rshift(lo + hi, 1) -- Equivalent to floor((lo + hi) / 2)
-    if key_fn(t[mid], key) < val_key then
+    if key_fn(t[mid]) < val_key then
       lo = mid + 1
     else
       hi = mid
@@ -462,18 +506,18 @@ end
 ---@generic T
 ---@param t T[]
 ---@param val T
----@param key? fun(val: any): any
 ---@param lo integer
 ---@param hi integer
+---@param key_fn fun(val: any): any
 ---@return integer i in range such that `t[j]` <= {val} for all j < i,
 ---                and `t[j]` > {val} for all j >= i,
 ---                or return {hi} if no such index is found.
-local function upper_bound(t, val, lo, hi, key)
+local function upper_bound(t, val, lo, hi, key_fn)
   local bit = require('bit') -- Load bitop on demand
-  local val_key = key_fn(val, key)
+  local val_key = key_fn(val)
   while lo < hi do
     local mid = bit.rshift(lo + hi, 1) -- Equivalent to floor((lo + hi) / 2)
-    if val_key < key_fn(t[mid], key) then
+    if val_key < key_fn(t[mid]) then
       hi = mid
     else
       lo = mid + 1
@@ -482,8 +526,8 @@ local function upper_bound(t, val, lo, hi, key)
   return lo
 end
 
---- Search for a position in a sorted list {t}
---- where {val} can be inserted while keeping the list sorted.
+--- Search for a position in a sorted |lua-list| {t} where {val} can be inserted while keeping the
+--- list sorted.
 ---
 --- Use {bound} to determine whether to return the first or the last position,
 --- defaults to "lower", i.e., the first position.
@@ -514,6 +558,7 @@ end
 ---   print(t[i]) -- { 3, 3, 3 }
 --- end
 --- ```
+---@since 14
 ---@generic T
 ---@param t T[] A comparable list.
 ---@param val T The value to search.
@@ -526,12 +571,12 @@ function vim.list.bisect(t, val, opts)
   opts = opts or {}
   local lo = opts.lo or 1
   local hi = opts.hi or #t + 1
-  local key = opts.key
+  local key_fn = make_key_fn(opts.key)
 
   if opts.bound == 'upper' then
-    return upper_bound(t, val, lo, hi, key)
+    return upper_bound(t, val, lo, hi, key_fn)
   else
-    return lower_bound(t, val, lo, hi, key)
+    return lower_bound(t, val, lo, hi, key_fn)
   end
 end
 
@@ -616,8 +661,8 @@ end
 ---
 ---@param behavior 'error'|'keep'|'force'|fun(key:any, prev_value:any?, value:any): any Decides what to do if a key is found in more than one map:
 ---      - "error": raise an error
----      - "keep":  use value from the leftmost map
 ---      - "force": use value from the rightmost map
+---      - "keep":  use value from the leftmost map
 ---      - If a function, it receives the current key, the previous value in the currently merged table (if present), the current value and should
 ---        return the value for the given key in the merged table.
 ---@param ... table Two or more tables
@@ -626,12 +671,22 @@ function vim.tbl_extend(behavior, ...)
   return tbl_extend(behavior, false, ...)
 end
 
---- Merges recursively two or more tables.
+--- Merges two or more tables recursively.
 ---
---- Only values that are empty tables or tables that are not |lua-list|s (indexed by consecutive
---- integers starting from 1) are merged recursively. This is useful for merging nested tables
---- like default and user configurations where lists should be treated as literals (i.e., are
---- overwritten instead of merged).
+--- Only |lua-dict| tables are merged recursively; |lua-list| tables are treated as opaque values
+--- (overwritten instead of merged). That is convenient for merging default/user configurations
+--- where lists typically should not be merged together.
+---
+--- Example:
+--- ```lua
+--- -- Set `config.settings.…` without worrying about whether intermediate dicts exist.
+--- local config = { settings = { tailwindCSS = { foo = 'bar' } } }
+--- local merged = vim.tbl_deep_extend('force',
+---   config,
+---   { settings = { tailwindCSS = { experimental = { configFile = '/my/config.json' } } } }
+--- )
+--- vim.print(merged)
+--- ```
 ---
 ---@see |vim.tbl_extend()|
 ---
@@ -639,8 +694,8 @@ end
 ---@generic T2: table
 ---@param behavior 'error'|'keep'|'force'|fun(key:any, prev_value:any?, value:any): any Decides what to do if a key is found in more than one map:
 ---      - "error": raise an error
----      - "keep":  use value from the leftmost map
 ---      - "force": use value from the rightmost map
+---      - "keep":  use value from the leftmost map
 ---      - If a function, it receives the current key, the previous value in the currently merged table (if present), the current value and should
 ---        return the value for the given key in the merged table.
 ---@param ... T2 Two or more tables
@@ -649,78 +704,80 @@ function vim.tbl_deep_extend(behavior, ...)
   return tbl_extend(behavior, true, ...)
 end
 
+---@param left any
+---@param right any
+---@param seen? table<table, table<table, boolean>>
+---@return boolean
+local function deep_equal(left, right, seen)
+  if left == right then
+    return true
+  end
+
+  if type(left) ~= type(right) then
+    return false
+  end
+
+  if type(left) ~= 'table' then
+    return false
+  end
+
+  ---@cast left table<any, any>
+  ---@cast right table<any, any>
+  seen = seen or {}
+  local seen_left = seen[left]
+  if seen_left and seen_left[right] ~= nil then
+    return seen_left[right]
+  end
+
+  seen_left = seen_left or {}
+  seen[left] = seen_left
+  -- Assume equality while descending so recursive structures can terminate.
+  seen_left[right] = true
+
+  for k, v in pairs(left) do
+    if not deep_equal(v, right[k], seen) then
+      seen_left[right] = false
+      return false
+    end
+  end
+
+  for k in pairs(right) do
+    if left[k] == nil then
+      seen_left[right] = false
+      return false
+    end
+  end
+
+  return true
+end
+
 --- Deep compare values for equality
 ---
 --- Tables are compared recursively unless they both provide the `eq` metamethod.
 --- All other types are compared using the equality `==` operator.
+--- Cyclic tables are supported.
 ---@param a any First value
 ---@param b any Second value
 ---@return boolean `true` if values are equals, else `false`
 function vim.deep_equal(a, b)
-  if a == b then
-    return true
-  end
-  if type(a) ~= type(b) then
-    return false
-  end
-  if type(a) == 'table' then
-    --- @cast a table<any,any>
-    --- @cast b table<any,any>
-    for k, v in pairs(a) do
-      if not vim.deep_equal(v, b[k]) then
-        return false
-      end
-    end
-    for k in pairs(b) do
-      if a[k] == nil then
-        return false
-      end
-    end
-    return true
-  end
-  return false
+  return deep_equal(a, b)
 end
 
---- Add the reverse lookup values to an existing table.
---- For example:
---- `tbl_add_reverse_lookup { A = 1 } == { [1] = 'A', A = 1 }`
+--- Gets a (nested) value from table `o` given by a sequence of keys `...`, or `nil` if not found.
 ---
---- Note that this *modifies* the input.
----@deprecated
----@param o table Table to add the reverse to
----@return table o
-function vim.tbl_add_reverse_lookup(o)
-  vim.deprecate('vim.tbl_add_reverse_lookup', nil, '0.12')
-
-  --- @cast o table<any,any>
-  --- @type any[]
-  local keys = vim.tbl_keys(o)
-  for _, k in ipairs(keys) do
-    local v = o[k]
-    if o[v] then
-      error(
-        string.format(
-          'The reverse lookup found an existing value for %q while processing key %q',
-          tostring(v),
-          tostring(k)
-        )
-      )
-    end
-    o[v] = k
-  end
-  return o
-end
-
---- Index into a table (first argument) via string keys passed as subsequent arguments.
---- Return `nil` if the key does not exist.
+--- Note: To _set_ deeply nested keys, see |vim.tbl_deep_extend()|.
 ---
---- Examples:
----
+--- Example:
 --- ```lua
---- vim.tbl_get({ key = { nested_key = true }}, 'key', 'nested_key') == true
---- vim.tbl_get({ key = {}}, 'key', 'nested_key') == nil
+--- local o = { a = { b = true } }
+--- -- Get `o.a.b`.
+--- vim.print(vim.tbl_get(o, 'a', 'b')) -- true
+--- o.a = {}
+--- vim.print(vim.tbl_get(o, 'a', 'b')) -- nil
 --- ```
+---
 ---@see |unpack()|
+---@see |vim.tbl_deep_extend()|
 ---
 ---@param o table Table to index
 ---@param ... any Optional keys (0 or more, variadic) via which to index the table
@@ -862,12 +919,6 @@ function vim.isarray(t)
   end
 end
 
---- @deprecated
-function vim.tbl_islist(t)
-  vim.deprecate('vim.tbl_islist', 'vim.islist', '0.12')
-  return vim.islist(t)
-end
-
 --- Tests if `t` is a "list": a table indexed _only_ by contiguous integers starting from 1 (what
 --- |lua-length| calls a "regular array").
 ---
@@ -891,13 +942,22 @@ function vim.islist(t)
   for _ in
     pairs(t--[[@as table<any,any>]])
   do
-    if t[j] == nil then
+    if rawget(t, j) == nil then
       return false
     end
     j = j + 1
   end
 
   return true
+end
+
+--- Tests if `t` is `nil` or |vim.NIL|.
+---
+--- @since 15
+--- @param t? any
+--- @return boolean `true` if `nil` or |vim.NIL|, else `false`.
+function vim.isnil(t)
+  return t == nil or t == vim.NIL
 end
 
 --- Counts the number of non-nil values in table `t`.
@@ -1164,27 +1224,13 @@ do
   ---       end
   ---     ```
   ---
-  --- 2. `vim.validate(spec)` (deprecated)
-  ---     where `spec` is of type
+  --- 2. `vim.validate(spec)` (DEPRECATED) where `spec` is of type
   ---    `table<string,[value:any, validator: vim.validate.Validator, optional_or_msg? : boolean|string]>)`
   ---
   ---     Validates a argument specification.
   ---     Specs are evaluated in alphanumeric order, until the first failure.
   ---
-  ---     Example:
-  ---
-  ---     ```lua
-  ---       function user.new(name, age, hobbies)
-  ---         vim.validate{
-  ---           name={name, 'string'},
-  ---           age={age, 'number'},
-  ---           hobbies={hobbies, 'table'},
-  ---         }
-  ---         -- ...
-  ---       end
-  ---     ```
-  ---
-  --- Examples with explicit argument values (can be run directly):
+  --- Examples:
   ---
   --- ```lua
   --- vim.validate('arg1', {'foo'}, 'table')
@@ -1197,15 +1243,11 @@ do
   ---
   --- vim.validate('arg1', 3, function(a) return (a % 2) == 0 end, 'even number')
   ---    --> error('arg1: expected even number, got 3')
-  --- ```
   ---
-  --- If multiple types are valid they can be given as a list.
-  ---
-  --- ```lua
+  --- -- If multiple types are valid they can be given as a list:
   --- vim.validate('arg1', {'foo'}, {'table', 'string'})
   --- vim.validate('arg2', 'foo', {'table', 'string'})
   --- -- NOP (success)
-  ---
   --- vim.validate('arg1', 1, {'string', 'table'})
   --- -- error('arg1: expected string|table, got number')
   --- ```
@@ -1221,7 +1263,7 @@ do
   ---     `'thread'`, `'userdata'`.
   ---   - (`fun(val:any): boolean, string?`) A function that returns a boolean and an optional
   ---     string message.
-  --- @param optional? boolean Argument is optional (may be omitted)
+  --- @param optional? boolean (default: false) Parameter is optional (may be omitted or nil)
   --- @param message? string message when validation fails
   --- @overload fun(name: string, val: any, validator: vim.validate.Validator, message: string)
   --- @overload fun(spec: table<string,[any, vim.validate.Validator, boolean|string]>)
@@ -1432,6 +1474,7 @@ end
 --- @class vim.context.mods
 --- @field bo? table<string, any>
 --- @field buf? integer
+--- @field cwd? string
 --- @field emsg_silent? boolean
 --- @field env? table<string, any>
 --- @field go? table<string, any>
@@ -1472,11 +1515,11 @@ local get_context_state = function(context)
     for name, _ in
       pairs(context[scope] or {} --[[@as table<string,any>]])
     do
-      local sc = scope == 'o' and scope_map[vim.api.nvim_get_option_info2(name, {}).scope] or scope
+      local sc = scope == 'o' and scope_map[vim.api.nvim_get_option_info2(name).scope] or scope
 
       -- Do not override already set state and fall back to `vim.NIL` for
       -- state `nil` values (which still needs restoring later)
-      res[sc][name] = vim.F.if_nil(res[sc][name], vim[sc][name], vim.NIL)
+      res[sc][name] = vim.nonnil(res[sc][name], vim[sc][name], vim.NIL)
 
       -- Always track global option value to properly restore later.
       -- This matters for at least `o` and `wo` (which might set either/both
@@ -1518,6 +1561,7 @@ function vim._with(context, f)
 
   vim.validate('context.bo', context.bo, 'table', true)
   vim.validate('context.buf', context.buf, 'number', true)
+  vim.validate('context.cwd', context.cwd, 'string', true)
   vim.validate('context.emsg_silent', context.emsg_silent, 'boolean', true)
   vim.validate('context.env', context.env, 'table', true)
   vim.validate('context.go', context.go, 'table', true)
@@ -1540,6 +1584,7 @@ function vim._with(context, f)
     if not vim.api.nvim_buf_is_valid(context.buf) then
       error('Invalid buffer id: ' .. context.buf)
     end
+    context.buf = context.buf == 0 and vim.api.nvim_get_current_buf() or context.buf
   end
 
   -- Check window exists
@@ -1551,6 +1596,7 @@ function vim._with(context, f)
     if context.buf and vim.api.nvim_win_get_buf(context.win) ~= context.buf then
       error('Can not set both `buf` and `win` context.')
     end
+    context.win = context.win == 0 and vim.api.nvim_get_current_win() or context.win
   end
 
   -- Decorate so that save-set-restore options is done in correct window-buffer
@@ -1573,6 +1619,13 @@ function vim._with(context, f)
       end
     end
 
+    --- @type string
+    local state_cwd
+    if context.cwd then
+      -- NOTE: triggers `DirChanged{Pre,}` events
+      state_cwd = vim.fn.chdir(context.cwd)
+    end
+
     -- Execute
     local res = { pcall(f) }
 
@@ -1587,6 +1640,11 @@ function vim._with(context, f)
       end
     end
 
+    if state_cwd then
+      -- NOTE: triggers `DirChanged{Pre,}` events
+      vim.fn.chdir(state_cwd)
+    end
+
     -- Return
     if not res[1] then
       error(res[2], 0)
@@ -1598,14 +1656,14 @@ function vim._with(context, f)
   return vim._with_c(context, callback)
 end
 
---- @param bufnr? integer
+--- @param buf? integer
 --- @return integer
-function vim._resolve_bufnr(bufnr)
-  if bufnr == nil or bufnr == 0 then
+function vim._resolve_bufnr(buf)
+  if buf == nil or buf == 0 then
     return vim.api.nvim_get_current_buf()
   end
-  vim.validate('bufnr', bufnr, 'number')
-  return bufnr
+  vim.validate('buf', buf, 'number')
+  return buf
 end
 
 --- @generic T
@@ -1618,7 +1676,81 @@ function vim._ensure_list(x)
   return { x }
 end
 
+--- Coerces {x} to an integer, like `tonumber()`, but rejects fractional values.
+---
+--- Returns `nil` if {x} cannot be converted with `tonumber()`, or if the
+--- resulting number is not integral.
+---
+--- @param x any Value to convert.
+--- @param base? integer Numeric base passed to `tonumber()`.
+--- @return integer? integer Converted integer value, or `nil`.
+function vim._tointeger(x, base)
+  --- @diagnostic disable-next-line:param-type-mismatch optional `base` is equivalent to `tonumber(x)`
+  local nx = tonumber(x, base)
+  if nx and nx == math.floor(nx) then
+    --- @cast nx integer
+    return nx
+  end
+end
+
+--- Coerces {x} to an integer and errors if conversion fails.
+---
+--- This is the throwing counterpart to |vim._tointeger()| and should be used
+--- when non-integer input is a programming error.
+---
+--- @param x any Value to convert.
+--- @param base? integer Numeric base passed to `tonumber()`.
+--- @return integer integer Converted integer value.
+function vim._assert_integer(x, base)
+  return vim._tointeger(x, base) or error(('Cannot convert %s to integer'):format(x))
+end
+
 -- Use max 32-bit signed int value to avoid overflow on 32-bit systems. #31633
 vim._maxint = 2 ^ 32 - 1
+
+--- Returns the first argument which is not nil.
+---
+--- If all arguments are nil, returns nil.
+---
+--- Example:
+---
+--- ```lua
+--- local a = nil
+--- local b = nil
+--- local c = 42
+--- local d = true
+--- assert(vim.nonnil(a, b, c, d) == 42)
+--- ```
+---
+--- @since 15
+--- @generic T
+--- @param ... T
+--- @return T
+function vim.nonnil(...)
+  local nargs = select('#', ...)
+  for i = 1, nargs do
+    local v = select(i, ...)
+    if v ~= nil then
+      return v
+    end
+  end
+  return nil
+end
+
+--- Calls the function `fn` in `protected mode` like |pcall()|, but returns
+--- `nil` on error.
+---
+--- @since 15
+--- @generic T
+--- @param fn fun(...):T
+--- @param ... any?
+--- @return T ...
+function vim.npcall(fn, ...)
+  return (function(success, ...)
+    if success then
+      return ...
+    end
+  end)(pcall(fn, ...))
+end
 
 return vim

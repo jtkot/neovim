@@ -442,14 +442,16 @@ static int huntype(FILE *fpi, FILE *fpo, int cols, int hextype, long base_off)
           p = 0;
           continue;
         }
-        want_off = (want_off << 4) | n1;
+        // Cast through unsigned to avoid signed left-shift overflow (UB) when
+        // garbage input feeds more than ~16 hex digits into the address column.
+        want_off = (long)(((unsigned long)want_off << 4) | (unsigned)n1);
       } else {  // HEX_BITS
         if (n1 < 0) {
           p = 0;
           bcnt = 0;
           continue;
         }
-        want_off = (want_off << 4) | n1;
+        want_off = (long)(((unsigned long)want_off << 4) | (unsigned)n1);
       }
       continue;
     }
@@ -464,7 +466,7 @@ static int huntype(FILE *fpi, FILE *fpo, int cols, int hextype, long base_off)
       }
 #endif
       if (base_off + want_off < have_off) {
-        error_exit(5, "Sorry, cannot seek backwards.");
+        error_exit(5, "Cannot seek backwards.");
       }
       for (; have_off < base_off + want_off; have_off++) {
         putc_or_die(0, fpo);
@@ -573,7 +575,7 @@ static void xxdline(FILE *fp, char *l, char *colors, int nz)
   static signed char zero_seen = 0;
 
   if (!nz && zero_seen == 1) {
-    strcpy(z, l);
+    snprintf(z, sizeof(z), "%s", l);
     if (colors) {
       memcpy(z_colors, colors, strlen(z));
     }
@@ -1000,7 +1002,7 @@ int main(int argc, char *argv[])
                      negseek ? -seekoff : seekoff);
       break;
     default:
-      error_exit(-1, "Sorry, cannot revert this type of hexdump");
+      error_exit(-1, "Cannot revert this type of hexdump");
     }
   }
 
@@ -1013,7 +1015,7 @@ int main(int argc, char *argv[])
                 negseek ? SEEK_END : SEEK_SET);
     }
     if (e < 0 && negseek) {
-      error_exit(4, "Sorry, cannot seek.");
+      error_exit(4, "Cannot seek.");
     }
     if (e >= 0) {
       seekoff = ftell(fp);
@@ -1024,7 +1026,7 @@ int main(int argc, char *argv[])
 
       while (s--) {
         if (getc_or_die(fp) == EOF) {
-          error_exit(4, "Sorry, cannot seek.");
+          error_exit(4, "Cannot seek.");
         }
       }
     }

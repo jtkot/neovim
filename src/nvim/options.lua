@@ -15,13 +15,11 @@
 --- @field deny_duplicates? boolean
 --- @field enable_if? string
 --- @field defaults? vim.option_defaults|vim.option_value|fun(): string
---- @field values? vim.option_valid_values
---- @field flags? true|table<string,integer>
+--- @field schema? vim.option_schema
 --- @field secure? true
 --- @field noglob? true
 --- @field normal_fname_chars? true
 --- @field pri_mkrc? true
---- @field deny_in_modelines? true
 --- @field normal_dname_chars? true
 --- @field modelineexpr? true
 --- @field func? true
@@ -50,7 +48,31 @@
 --- @alias vim.option_scope 'global'|'buf'|'win'
 --- @alias vim.option_type 'boolean'|'number'|'string'
 --- @alias vim.option_value boolean|integer|string
---- @alias vim.option_valid_values (string|[string,vim.option_valid_values])[]
+
+--- Options for a `char`/`chars` schema key.
+--- @class vim.option_schema.char.opts
+--- @field field? string|false  fcs_chars/lcs_chars field (default: key name; false = no storage)
+--- @field def? string  default char
+--- @field fallback? string  default char when "def" isn't single-width
+
+--- A `char`/`chars` schema key (e.g. 'listchars' "eol"/"tab"), generating a chars_tab[] entry.
+--- @alias vim.option_schema.char [string, 'char'|'chars', vim.option_schema.char.opts?]
+
+--- A key of a `dict` schema: a bare flag (boolean), a typed value, or an enum value.
+--- @alias vim.option_schema.dictkey
+--- | string
+--- | [string, 'num'|'snum'|'str']
+--- | [string, 'enum', {values: string[]}]
+
+--- Declarative grammar of a structured "string" option, as a category record. Usually exactly one
+--- field is set; `flags`+`enum` combine for 'cursorlineopt' (its "both" alias has no bit).
+--- @class vim.option_schema
+--- @field chars? vim.option_schema.char[]     chars_tab[] dispatch, e.g. 'listchars'
+--- @field dict? vim.option_schema.dictkey[]   key:value map, reified to a keyset, e.g. 'diffopt'
+--- @field enum? string[]                      single-choice values, e.g. 'ambiwidth' {'single','double'}
+--- @field flagchars? table<string,string>     char flags: name -> char, e.g. 'formatoptions'
+--- @field flags? (string|[string,integer]|[string,integer,string])[] bitmask flags (a `set` + C constants), e.g. 'foldopen'. A 3rd tuple element overrides the C token.
+--- @field set? string[]                       multi-choice (comma list) values, e.g. 'backspace'
 
 --- @alias vim.option_redraw
 --- |'statuslines'
@@ -89,7 +111,7 @@ end
 local options = {
   cstr = cstr,
   --- @type string[]
-  valid_scopes = { 'global', 'buf', 'win' },
+  valid_scopes = { 'global', 'buf', 'win', 'tab' },
   --- @type vim.option_meta[]
   --- The order of the options MUST be alphabetic for ":set all".
   options = {
@@ -120,7 +142,9 @@ local options = {
       abbreviation = 'ambw',
       cb = 'did_set_ambiwidth',
       defaults = 'single',
-      values = { 'single', 'double' },
+      schema = {
+        enum = { 'single', 'double' },
+      },
       desc = [=[
         Tells Vim what to do with characters with East Asian Width Class
         Ambiguous (such as Euro, Registered Sign, Copyright Sign, Greek
@@ -302,11 +326,15 @@ local options = {
       abbreviation = 'ar',
       defaults = true,
       desc = [=[
-        When a file has been detected to have been changed outside of Vim and
-        it has not been changed inside of Vim, automatically read it again.
-        When the file has been deleted this is not done, so you have the text
-        from before it was deleted.  When it appears again then it is read.
-        |timestamp|
+        When a file was changed outside of Nvim, automatically read it again.
+        Skipped if the file was deleted (so you still have the last-available
+        text). If the file appears again, then it is read; you can |undo| to
+        see the previous contents. |timestamp|
+
+        This is driven (partially) by OS filewatcher events |uv_fs_event_t|,
+        so buffers are updated immediately (instead of only on focus-change or
+        shell-commands).
+
         If this option has a local value, use this command to switch back to
         using the global value: >vim
         	set autoread<
@@ -323,10 +351,10 @@ local options = {
       defaults = false,
       desc = [=[
         Write the contents of the file, if it has been modified, on each
-        `:next`, `:rewind`, `:last`, `:first`, `:previous`, `:stop`,
-        `:suspend`, `:tag`, `:!`, `:make`, CTRL-] and CTRL-^ command; and when
-        a `:buffer`, CTRL-O, CTRL-I, '{A-Z0-9}, or `{A-Z0-9} command takes one
-        to another file.
+        `:next`, `:rewind`, `:last`, `:first`, `:previous`, `:tag`, `:stop`,
+        `:suspend`, `:!`, `:make`, `:terminal`, CTRL-] or CTRL-^ command; and
+        when a `:buffer`, CTRL-O, CTRL-I, '{A-Z0-9}, or `{A-Z0-9} command
+        switches to another file.
         A buffer is not written if it becomes hidden, e.g. when 'bufhidden' is
         set to "hide" and `:next` is used.
         Note that for some commands the 'autowrite' option is not used, see
@@ -347,8 +375,8 @@ local options = {
       abbreviation = 'awa',
       defaults = false,
       desc = [=[
-        Like 'autowrite', but also used for commands ":edit", ":enew",
-        ":quit", ":qall", ":exit", ":xit", ":recover" and closing the Vim
+        Like 'autowrite', but also used for commands `:edit`, `:enew`,
+        `:quit`, `:qall`, `:exit`, `:xit`, `:recover` and closing the Vim
         window.
         Setting this option also implies that Vim behaves like 'autowrite' has
         been set.
@@ -363,15 +391,21 @@ local options = {
       abbreviation = 'bg',
       cb = 'did_set_background',
       defaults = 'dark',
-      values = { 'light', 'dark' },
+      schema = {
+        enum = { 'light', 'dark' },
+      },
       desc = [=[
         When set to "dark" or "light", adjusts the default color groups for
         that background type.  The |TUI| or other UI sets this on startup
-        (triggering |OptionSet|) if it can detect the background color.
+        if it can detect the background color, and re-detects it whenever a UI
+        attaches later, unless 'background' was set explicitly.  When multiple
+        UIs are attached they share one value, decided by "last wins" (may
+        not be the most recently-attached UI, since it depends on response
+        speed).
 
         This option does NOT change the background color, it tells Nvim what
-        the "inherited" (terminal/GUI) background looks like.
-        See |:hi-normal| if you want to set the background color explicitly.
+        the "inherited" (terminal/GUI) background looks like. See |:hi-normal|
+        to set the background color explicitly.
         					*g:colors_name*
         When a color scheme is loaded (the "g:colors_name" variable is set)
         changing 'background' will cause the color scheme to be reloaded.  If
@@ -379,14 +413,13 @@ local options = {
         However, if the color scheme sets 'background' itself the effect may
         be undone.  First delete the "g:colors_name" variable when needed.
 
-        Normally this option would be set in the vimrc file.  Possibly
-        depending on the terminal name.  Example: >vim
+        Historically, this option was set in the vimrc file.  Example: >vim
         	if $TERM ==# "xterm"
         	  set background=dark
         	endif
-        <	When this option is changed, the default settings for the highlight groups
-        will change.  To use other settings, place ":highlight" commands AFTER
-        the setting of the 'background' option.
+        <	When this option is changed, the defaults for highlight groups
+        will change.  To override those defaults, place ":highlight" commands
+        AFTER setting the 'background' option.
       ]=],
       full_name = 'background',
       scope = { 'global' },
@@ -398,7 +431,9 @@ local options = {
       abbreviation = 'bs',
       cb = 'did_set_backspace',
       defaults = 'indent,eol,start',
-      values = { 'indent', 'eol', 'start', 'nostop' },
+      schema = {
+        set = { 'indent', 'eol', 'start', 'nostop' },
+      },
       deny_duplicates = true,
       desc = [=[
         Influences the working of <BS>, <Del>, CTRL-W and CTRL-U in Insert
@@ -447,8 +482,9 @@ local options = {
       abbreviation = 'bkc',
       cb = 'did_set_backupcopy',
       defaults = { condition = 'UNIX', if_false = 'auto', if_true = 'auto' },
-      values = { 'yes', 'auto', 'no', 'breaksymlink', 'breakhardlink' },
-      flags = true,
+      schema = {
+        flags = { 'yes', 'auto', 'no', 'breaksymlink', 'breakhardlink' },
+      },
       deny_duplicates = true,
       desc = [=[
         When writing a file and a backup is made, this option tells how it's
@@ -565,8 +601,6 @@ local options = {
         The use of |:set+=| and |:set-=| is preferred when adding or removing
         directories from the list.  This avoids problems when a future version
         uses another default.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = 'nodefault',
       full_name = 'backupdir',
@@ -645,29 +679,30 @@ local options = {
     {
       abbreviation = 'bo',
       defaults = 'all',
-      values = {
-        'all',
-        'backspace',
-        'cursor',
-        'complete',
-        'copy',
-        'ctrlg',
-        'error',
-        'esc',
-        'ex',
-        'hangul',
-        'insertmode',
-        'lang',
-        'mess',
-        'showmatch',
-        'operator',
-        'register',
-        'shell',
-        'spell',
-        'term',
-        'wildmode',
+      schema = {
+        flags = {
+          'all',
+          'backspace',
+          'cursor',
+          'complete',
+          'copy',
+          'ctrlg',
+          'error',
+          'esc',
+          'ex',
+          'hangul',
+          'insertmode',
+          'lang',
+          'mess',
+          'showmatch',
+          'operator',
+          'register',
+          'shell',
+          'spell',
+          'term',
+          'wildmode',
+        },
       },
-      flags = true,
       deny_duplicates = true,
       desc = [=[
         Specifies for which events the bell will not be rung.  It is a comma-
@@ -789,7 +824,6 @@ local options = {
         if_true = ' \t!@*-+;:,./?',
         doc = '" ^I!@*-+;:,./?"',
       },
-      flags = true,
       desc = [=[
         This option lets you choose which characters might cause a line
         break if 'linebreak' is on.  Only works for ASCII characters.
@@ -820,8 +854,15 @@ local options = {
       abbreviation = 'briopt',
       cb = 'did_set_breakindentopt',
       defaults = '',
-      -- Keep this in sync with briopt_check().
-      values = { 'shift:', 'min:', 'sbr', 'list:', 'column:' },
+      schema = {
+        dict = {
+          { 'shift', 'snum' },
+          { 'min', 'num' },
+          'sbr', -- unsigned number.
+          { 'list', 'snum' },
+          { 'column', 'snum' },
+        },
+      },
       deny_duplicates = true,
       desc = [=[
         Settings for 'breakindent'.  It can consist of the following optional
@@ -857,7 +898,7 @@ local options = {
       redraw = { 'current_buffer' },
       scope = { 'win' },
       short_desc = N_("settings for 'breakindent'"),
-      type = 'string',
+      type = 'string', -- OptKeyDict_briopt
     },
     {
       abbreviation = 'bsdir',
@@ -883,7 +924,9 @@ local options = {
       abbreviation = 'bh',
       cb = 'did_set_bufhidden',
       defaults = '',
-      values = { '', 'hide', 'unload', 'delete', 'wipe' },
+      schema = {
+        enum = { '', 'hide', 'unload', 'delete', 'wipe' },
+      },
       desc = [=[
         This option specifies what happens when a buffer is no longer
         displayed in a window:
@@ -935,26 +978,29 @@ local options = {
       abbreviation = 'bt',
       cb = 'did_set_buftype',
       defaults = '',
-      values = {
-        '',
-        'acwrite',
-        'help',
-        'nofile',
-        'nowrite',
-        'quickfix',
-        'terminal',
-        'prompt',
+      schema = {
+        enum = {
+          '',
+          'acwrite',
+          'help',
+          'nofile',
+          'nowrite',
+          'quickfix',
+          'terminal',
+          'prompt',
+        },
       },
       desc = [=[
         The value of this option specifies the type of a buffer:
-          <empty>	normal buffer
-          acwrite	buffer will always be written with |BufWriteCmd|s
-          help		help buffer (do not set this manually)
-          nofile	buffer is not related to a file, will not be written
-          nowrite	buffer will not be written
-          prompt	buffer where only the last section can be edited, for
+          (empty)	Normal buffer.
+          acwrite	Buffer will always be written with |BufWriteCmd|.
+          help		Help buffer (do not set this manually).
+          nofile	Buffer is not a file, will not be written.
+          nowrite	Buffer represents a filepath (such as a directory),
+        		but will not be written.
+          prompt	Buffer where only the last section can be edited, for
         		use by plugins. |prompt-buffer|
-          quickfix	list of errors |:cwindow| or locations |:lwindow|
+          quickfix	List of errors |:cwindow| or locations |:lwindow|
           terminal	|terminal-emulator| buffer
 
         This option is used together with 'bufhidden' and 'swapfile' to
@@ -1017,8 +1063,9 @@ local options = {
     {
       abbreviation = 'cmp',
       defaults = 'internal,keepascii',
-      values = { 'internal', 'keepascii' },
-      flags = true,
+      schema = {
+        flags = { 'internal', 'keepascii' },
+      },
       deny_duplicates = true,
       desc = [=[
         Specifies details about changing the case of letters.  It may contain
@@ -1051,8 +1098,6 @@ local options = {
         When on, |:cd|, |:tcd| and |:lcd| without an argument changes the
         current working directory to the |$HOME| directory like in Unix.
         When off, those commands just print the current directory name.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'cdhome',
       scope = { 'global' },
@@ -1082,8 +1127,6 @@ local options = {
         override it: >vim
           let &cdpath = ',' .. substitute(substitute($CDPATH, '[, ]', '\\\0', 'g'), ':', ',', 'g')
         <	Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
         (parts of 'cdpath' can be passed to the shell to expand file names).
       ]=],
       expand = true,
@@ -1179,9 +1222,6 @@ local options = {
         	set charconvert=<SID>SomeConvert()
         <	Otherwise the expression is evaluated in the context of the script
         where the option was set, thus script-local items are available.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'charconvert',
       scope = { 'global' },
@@ -1307,8 +1347,9 @@ local options = {
     {
       abbreviation = 'cb',
       defaults = '',
-      values = { 'unnamed', 'unnamedplus' },
-      flags = true,
+      schema = {
+        flags = { 'unnamed', 'unnamedplus' },
+      },
       desc = [=[
         This option is a list of comma-separated names.
         These names are recognized:
@@ -1349,21 +1390,18 @@ local options = {
       desc = [=[
         Number of screen lines to use for the command-line.  Helps avoiding
         |hit-enter| prompts.
-        The value of this option is stored with the tab page, so that each tab
-        page can have a different value.
+        The value of this option is stored with the tabpage, so that each
+        tabpage can have a different value.
 
         When 'cmdheight' is zero, there is no command-line unless it is being
         used.  The command-line will cover the last line of the screen when
         shown.
 
-        WARNING: `cmdheight=0` is EXPERIMENTAL. Expect some unwanted behaviour.
-        Some 'shortmess' flags and similar mechanism might fail to take effect,
-        causing unwanted hit-enter prompts.  Some informative messages, both
-        from Nvim itself and plugins, will not be displayed.
+        WARNING: `cmdheight=0` is EXPERIMENTAL. Works better with |ui2| enabled.
       ]=],
       full_name = 'cmdheight',
       redraw = { 'all_windows' },
-      scope = { 'global' },
+      scope = { 'global', 'tab' },
       short_desc = N_('number of lines to use for the command-line'),
       type = 'number',
       varname = 'p_ch',
@@ -1482,7 +1520,9 @@ local options = {
       abbreviation = 'cpt',
       cb = 'did_set_complete',
       defaults = '.,w,b,u,t',
-      values = { '.', 'w', 'b', 'u', 'k', 'kspell', 's', 'i', 'd', ']', 't', 'U', 'f', 'F', 'o' },
+      schema = {
+        set = { '.', 'w', 'b', 'u', 'k', 'kspell', 's', 'i', 'd', ']', 't', 'U', 'f', 'F', 'o' },
+      },
       deny_duplicates = true,
       desc = [=[
         This option controls how completion |ins-completion| behaves when
@@ -1546,8 +1586,11 @@ local options = {
         and from tags to 5.  Other sources remain unlimited.
         Note: The match limit takes effect only during forward completion
         (CTRL-N) and is ignored during backward completion (CTRL-P).
+
+        This option cannot be set in a modeline when 'modelineexpr' is off.
       ]=],
       full_name = 'complete',
+      modelineexpr = true,
       list = 'onecomma',
       scope = { 'buf' },
       short_desc = N_('specify how Insert mode completion works'),
@@ -1566,8 +1609,6 @@ local options = {
         invoked and what it should return.  The value can be the name of a
         function, a |lambda| or a |Funcref|.  See |option-value-function| for
         more information.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'completefunc',
       func = true,
@@ -1581,7 +1622,6 @@ local options = {
       abbreviation = 'cia',
       cb = 'did_set_completeitemalign',
       defaults = 'abbr,kind,menu',
-      flags = true,
       deny_duplicates = true,
       desc = [=[
         A comma-separated list of strings that controls the alignment and
@@ -1602,20 +1642,22 @@ local options = {
       abbreviation = 'cot',
       cb = 'did_set_completeopt',
       defaults = 'menu,popup',
-      values = {
-        'menu',
-        'menuone',
-        'longest',
-        'preview',
-        'popup',
-        'noinsert',
-        'noselect',
-        'fuzzy',
-        'nosort',
-        'preinsert',
-        'nearest',
+      schema = {
+        flags = {
+          'fuzzy',
+          'longest',
+          'menu',
+          'menuone',
+          'nearest',
+          'noinsert',
+          'noselect',
+          'nosort',
+          'popup',
+          'preinsert',
+          'preselect',
+          'preview',
+        },
       },
-      flags = true,
       deny_duplicates = true,
       desc = [=[
         A comma-separated list of options for Insert mode completion
@@ -1645,8 +1687,8 @@ local options = {
         	    See also |preinserted()|.
 
            menu	    Use a popup menu to show the possible completions.  The
-        	    menu is only shown when there is more than one match and
-        	    sufficient colors are available.  |ins-completion-menu|
+        	    menu is only shown when there is more than one match.
+        	    |ins-completion-menu|
 
            menuone  Use the popup menu also when there is only one match.
         	    Useful when there is additional information about the
@@ -1663,8 +1705,7 @@ local options = {
         	    "menu" or "menuone". No effect if "longest" is present.
 
            noselect Same as "noinsert", except that no menu item is
-        	    pre-selected.  If both "noinsert" and "noselect" are
-        	    present, "noselect" takes precedence.  This is enabled
+        	    pre-selected.  Takes precedence over "noinsert". Enabled
         	    automatically when 'autocomplete' is on, unless
         	    "preinsert" is also enabled.
 
@@ -1686,12 +1727,23 @@ local options = {
         	    'ignorecase' is set without 'infercase'.
         	    See also |preinserted()|.
 
+           preselect
+        	    When one of |complete-items| has its "preselect" field set
+        	    (e.g., as indicated by an LSP server), select the first
+        	    such item in the |popupmenu-completion|. Takes precedence
+        	    over "noselect".
+
+        	    Unlike the implicit selection behavior (when "noselect" is
+        	    not set), this preserves the original sort order and
+        	    navigates to the preselect item rather than always
+        	    selecting the first item.
+
            preview  Show extra information about the currently selected
         	    completion in the preview window.  Only works in
         	    combination with "menu" or "menuone".
 
-        Only "fuzzy", "longest", "popup", "preinsert" and "preview" have an
-        effect when 'autocomplete' is enabled.
+        Only "fuzzy", "longest", "popup", "preinsert", "preselect" and
+        "preview" have an effect when 'autocomplete' is enabled.
 
         This option does not apply to |cmdline-completion|.  See 'wildoptions'
         for that.
@@ -1708,7 +1760,9 @@ local options = {
       abbreviation = 'csl',
       cb = 'did_set_completeslash',
       defaults = '',
-      values = { '', 'slash', 'backslash' },
+      schema = {
+        enum = { '', 'slash', 'backslash' },
+      },
       desc = [=[
         		only modifiable in MS-Windows
         When this option is set it overrules 'shellslash' for completion:
@@ -2081,6 +2135,56 @@ local options = {
         		whitespace following the word in the motion.
       ]=],
       expand_cb = 'expand_set_cpoptions',
+      -- Generates kCpo* flag constants. CPO_VI/CPO_VIM stay hand-defined in option_vars.h.
+      schema = {
+        flagchars = {
+          altread = 'a', -- ":read" sets alternate file name
+          altwrite = 'A', -- ":write" sets alternate file name
+          bar = 'b', -- "\|" ends a mapping
+          bslash = 'B', -- backslash in mapping is not special
+          search = 'c',
+          concat = 'C', -- Don't concatenate sourced lines
+          dottag = 'd', -- "./tags" in 'tags' is in current dir
+          digraph = 'D', -- No digraph after "r", "f", etc.
+          execbuf = 'e',
+          emptyregion = 'E', -- operating on empty region is an error
+          fnamer = 'f', -- set file name for ":r file"
+          fnamew = 'F', -- set file name for ":w file"
+          intmod = 'i', -- interrupt a read makes buffer modified
+          indent = 'I', -- remove auto-indent more often
+          endofsent = 'J', -- need two spaces to detect end of sentence
+          koffset = 'K', -- don't wait for key code in mappings
+          literal = 'l', -- take char after backslash in [] literal
+          listwm = 'L', -- 'list' changes wrapmargin
+          showmatch = 'm',
+          matchbsl = 'M', -- "%" ignores use of backslashes
+          numcol = 'n', -- 'number' column also used for text
+          lineoff = 'o',
+          overnew = 'O', -- silently overwrite new file
+          fnameapp = 'P', -- set file name for ":w >>file"
+          joincol = 'q', -- with "3J" use column after first join
+          redo = 'r',
+          remmark = 'R', -- remove marks when filtering
+          bufopt = 's',
+          bufoptglob = 'S',
+          tagpat = 't', -- tag pattern is used for "n"
+          undo = 'u', -- "u" undoes itself
+          backspace = 'v', -- "v" keep deleted text
+          fwrite = 'W', -- "w!" doesn't overwrite readonly files
+          esc = 'x',
+          replcnt = 'X', -- "R" with a count only deletes chars once
+          yank = 'y',
+          keepro = 'Z', -- don't reset 'readonly' on ":w!"
+          dollar = '$',
+          filter = '!',
+          match = '%',
+          plus = '+', -- ":write file" resets 'modified'
+          regappend = '>', -- insert NL when appending to a register
+          scolon = ';', -- using "," and ";" will skip over char if cursor would not move
+          nosymlinks = '~', -- don't resolve symlinks when changing directory
+          changew = '_', -- "cw" special-case
+        },
+      },
       full_name = 'cpoptions',
       list = 'flags',
       redraw = { 'all_windows' },
@@ -2145,12 +2249,14 @@ local options = {
       abbreviation = 'culopt',
       cb = 'did_set_cursorlineopt',
       defaults = 'both',
-      -- Keep this in sync with fill_culopt_flags().
-      values = { 'line', 'screenline', 'number', 'both' },
-      flags = {
-        Line = 0x01,
-        Screenline = 0x02,
-        Number = 0x04,
+      -- Keep this in sync with fill_culopt_flags(). "both" is an alias (line+number), not its own bit.
+      schema = {
+        flags = {
+          { 'line', 0x01 },
+          { 'screenline', 0x02 },
+          { 'number', 0x04 },
+        },
+        enum = { 'both' },
       },
       deny_duplicates = true,
       desc = [=[
@@ -2177,7 +2283,9 @@ local options = {
     },
     {
       defaults = '',
-      values = { 'msg', 'throw', 'beep' },
+      schema = {
+        set = { 'msg', 'throw', 'beep' },
+      },
       desc = [=[
         These values can be used:
         msg	Error messages that would otherwise be omitted will be given
@@ -2339,8 +2447,6 @@ local options = {
       desc = [=[
         Expression which is evaluated to obtain a diff file (either ed-style
         or unified-style) from two versions of a file.  See |diff-diffexpr|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'diffexpr',
       redraw = { 'curswant' },
@@ -2354,27 +2460,28 @@ local options = {
       abbreviation = 'dip',
       cb = 'did_set_diffopt',
       defaults = 'internal,filler,closeoff,indent-heuristic,inline:char,linematch:40',
-      -- Keep this in sync with diffopt_changed().
-      values = {
-        'filler',
-        'anchor',
-        'context:',
-        'iblank',
-        'icase',
-        'iwhite',
-        'iwhiteall',
-        'iwhiteeol',
-        'horizontal',
-        'vertical',
-        'closeoff',
-        'hiddenoff',
-        'foldcolumn:',
-        'followwrap',
-        'internal',
-        'indent-heuristic',
-        { 'algorithm:', { 'myers', 'minimal', 'patience', 'histogram' } },
-        { 'inline:', { 'none', 'simple', 'char', 'word' } },
-        'linematch:',
+      schema = {
+        dict = {
+          'filler',
+          'anchor',
+          { 'context', 'num' },
+          'iblank',
+          'icase',
+          'iwhite',
+          'iwhiteall',
+          'iwhiteeol',
+          'horizontal',
+          'vertical',
+          'closeoff',
+          'hiddenoff',
+          { 'foldcolumn', 'num' },
+          'followwrap',
+          'internal',
+          'indent-heuristic',
+          { 'algorithm', 'enum', { values = { 'myers', 'minimal', 'patience', 'histogram' } } },
+          { 'inline', 'enum', { values = { 'none', 'simple', 'char', 'word' } } },
+          { 'linematch', 'num' },
+        },
       },
       deny_duplicates = true,
       desc = [=[
@@ -2396,7 +2503,7 @@ local options = {
 
         	closeoff	When a window is closed where 'diff' is set
         			and there is only one window remaining in the
-        			same tab page with 'diff' set, execute
+        			same tabpage with 'diff' set, execute
         			`:diffoff` in that window.  This undoes a
         			`:diffsplit` command.
 
@@ -2459,7 +2566,10 @@ local options = {
         				difference.  Non-alphanumeric
         				multi-byte characters such as emoji
         				and CJK characters are considered
-        				individual words.
+        				individual words.  Small gaps of
+        				non-word characters (5 bytes or less)
+        				between changes are merged into a
+        				single highlight block.
 
         	internal	Use the internal diff library.  This is
         			ignored when 'diffexpr' is set.  *E960*
@@ -2515,7 +2625,7 @@ local options = {
       redraw = { 'current_window' },
       scope = { 'global' },
       short_desc = N_('options for using diff mode'),
-      type = 'string',
+      type = 'string', -- OptKeyDict_dip
       varname = 'p_dip',
     },
     {
@@ -2575,9 +2685,6 @@ local options = {
         others on the computer may be able to see the files.
         Use |:set+=| and |:set-=| when adding or removing directories from the
         list, this avoids problems if the Nvim default is changed.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = 'nodefault',
       full_name = 'directory',
@@ -2592,8 +2699,9 @@ local options = {
       abbreviation = 'dy',
       cb = 'did_set_display',
       defaults = 'lastline',
-      values = { 'lastline', 'truncate', 'uhex', 'msgsep' },
-      flags = true,
+      schema = {
+        flags = { 'lastline', 'truncate', 'uhex', 'msgsep' },
+      },
       deny_duplicates = true,
       desc = [=[
         Change the way text is displayed.  This is a comma-separated list of
@@ -2626,7 +2734,9 @@ local options = {
     {
       abbreviation = 'ead',
       defaults = 'both',
-      values = { 'both', 'ver', 'hor' },
+      schema = {
+        enum = { 'both', 'ver', 'hor' },
+      },
       desc = [=[
         Tells when the 'equalalways' option applies:
         	ver	vertically, width of windows is not affected
@@ -2673,7 +2783,6 @@ local options = {
       abbreviation = 'enc',
       cb = 'did_set_encoding',
       defaults = macros('ENC_DFLT', 'string'),
-      deny_in_modelines = true,
       desc = [=[
         String-encoding used internally and for |RPC| communication.
         Always UTF-8.
@@ -2767,8 +2876,6 @@ local options = {
         or 'indentexpr'.
         Environment variables are expanded |:set_env|.  See |option-backslash|
         about including spaces and backslashes.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'equalprg',
@@ -2804,8 +2911,6 @@ local options = {
         NOT used for the ":make" command.  See 'makeef' for that.
         Environment variables are expanded |:set_env|.
         See |option-backslash| about including spaces and backslashes.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'errorfile',
@@ -2919,8 +3024,6 @@ local options = {
         3. Create ".nvim.lua" in your project root directory with this line: >lua
             vim.cmd[[set runtimepath+=.nvim]]
         <
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'exrc',
       scope = { 'global' },
@@ -3052,7 +3155,9 @@ local options = {
         if_false = 'unix',
         doc = 'Windows: "dos", Unix: "unix"',
       },
-      values = { 'unix', 'dos', 'mac' },
+      schema = {
+        enum = { 'unix', 'dos', 'mac' },
+      },
       desc = [=[
         This gives the <EOL> of the current buffer, which is used for
         reading/writing the buffer from/to a file:
@@ -3209,6 +3314,32 @@ local options = {
       cb = 'did_set_chars_option',
       defaults = '',
       deny_duplicates = true,
+      -- 'fillchars' schema: generates `fcs_tab` (the `fcs_chars` dispatch table).
+      schema = {
+        chars = {
+          { 'stl', 'char', { def = ' ' } },
+          { 'stlnc', 'char', { def = ' ' } },
+          { 'wbr', 'char', { def = ' ' } },
+          { 'horiz', 'char', { def = '─', fallback = '-' } },
+          { 'horizup', 'char', { def = '┴', fallback = '-' } },
+          { 'horizdown', 'char', { def = '┬', fallback = '-' } },
+          { 'vert', 'char', { def = '│', fallback = '|' } },
+          { 'vertleft', 'char', { def = '┤', fallback = '|' } },
+          { 'vertright', 'char', { def = '├', fallback = '|' } },
+          { 'verthoriz', 'char', { def = '┼', fallback = '+' } },
+          { 'fold', 'char', { def = '·', fallback = '-' } },
+          { 'foldopen', 'char', { def = '-' } },
+          { 'foldclose', 'char', { field = 'foldclosed', def = '+' } },
+          { 'foldsep', 'char', { def = '│', fallback = '|' } },
+          { 'foldinner', 'char' },
+          { 'diff', 'char', { def = '-' } },
+          { 'msgsep', 'char', { def = ' ' } },
+          { 'eob', 'char', { def = '~' } },
+          { 'lastline', 'char', { def = '@' } },
+          { 'trunc', 'char', { def = '>' } },
+          { 'truncrl', 'char', { def = '<' } },
+        },
+      },
       desc = [=[
         Characters to fill the statuslines, vertical separators, special
         lines in the window and truncated text in the |ins-completion-menu|.
@@ -3284,7 +3415,7 @@ local options = {
       ]=],
       expand_cb = 'expand_set_chars_option',
       full_name = 'fillchars',
-      list = 'onecomma',
+      list = 'onecommacolon',
       redraw = { 'current_window' },
       scope = { 'global', 'win' },
       short_desc = N_('characters to use for displaying special items'),
@@ -3307,7 +3438,8 @@ local options = {
         |String| and is the |:find| command argument.  The second argument is
         a |Boolean| and is set to |v:true| when the function is called to get
         a List of command-line completion matches for the |:find| command.
-        The function should return a List of strings.
+        The function should return a List, which is handled similarly to the
+        return value of a |:command-completion-customlist| function.
 
         The function is called only once per |:find| command invocation.
         The function can process all the directories specified in 'path'.
@@ -3322,8 +3454,6 @@ local options = {
         It is not allowed to change text or jump to another window while
         executing the 'findfunc' |textlock|.
 
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
 
         Examples:
         >vim
@@ -3374,7 +3504,9 @@ local options = {
     {
       abbreviation = 'fcl',
       defaults = '',
-      values = { 'all' },
+      schema = {
+        set = { 'all' },
+      },
       deny_duplicates = true,
       desc = [=[
         When set to "all", a fold is closed when the cursor isn't in it and
@@ -3392,27 +3524,29 @@ local options = {
     {
       abbreviation = 'fdc',
       defaults = '0',
-      values = {
-        'auto',
-        'auto:1',
-        'auto:2',
-        'auto:3',
-        'auto:4',
-        'auto:5',
-        'auto:6',
-        'auto:7',
-        'auto:8',
-        'auto:9',
-        '0',
-        '1',
-        '2',
-        '3',
-        '4',
-        '5',
-        '6',
-        '7',
-        '8',
-        '9',
+      schema = {
+        enum = {
+          'auto',
+          'auto:1',
+          'auto:2',
+          'auto:3',
+          'auto:4',
+          'auto:5',
+          'auto:6',
+          'auto:7',
+          'auto:8',
+          'auto:9',
+          '0',
+          '1',
+          '2',
+          '3',
+          '4',
+          '5',
+          '6',
+          '7',
+          '8',
+          '9',
+        },
       },
       desc = [=[
         When and how to draw the foldcolumn. Valid values are:
@@ -3549,7 +3683,9 @@ local options = {
       abbreviation = 'fdm',
       cb = 'did_set_foldmethod',
       defaults = 'manual',
-      values = { 'manual', 'expr', 'marker', 'indent', 'syntax', 'diff' },
+      schema = {
+        enum = { 'manual', 'expr', 'marker', 'indent', 'syntax', 'diff' },
+      },
       desc = [=[
         The kind of folding used for the current window.  Possible values:
         |fold-manual|	manual	    Folds are created manually.
@@ -3602,20 +3738,21 @@ local options = {
     {
       abbreviation = 'fdo',
       defaults = 'block,hor,mark,percent,quickfix,search,tag,undo',
-      values = {
-        'all',
-        'block',
-        'hor',
-        'mark',
-        'percent',
-        'quickfix',
-        'search',
-        'tag',
-        'insert',
-        'undo',
-        'jump',
+      schema = {
+        flags = {
+          'all',
+          'block',
+          'hor',
+          'mark',
+          'percent',
+          'quickfix',
+          'search',
+          'tag',
+          'insert',
+          'undo',
+          'jump',
+        },
       },
-      flags = true,
       deny_duplicates = true,
       desc = [=[
         Specifies for which type of commands folds will be opened, if the
@@ -3770,6 +3907,32 @@ local options = {
         "+=" and "-=" feature of ":set" |add-option-flags|.
       ]=],
       expand_cb = 'expand_set_formatoptions',
+      -- Generates kFo* flag constants (used by has_format_option()). Keep the concatenated set in
+      -- sync with FO_ALL in option_vars.h.
+      schema = {
+        flagchars = {
+          wrap = 't',
+          wrap_coms = 'c',
+          ret_coms = 'r',
+          open_coms = 'o',
+          no_open_coms = '/',
+          q_coms = 'q',
+          q_number = 'n',
+          q_second = '2',
+          ins_vi = 'v',
+          ins_long = 'l',
+          ins_blank = 'b',
+          mbyte_break = 'm', -- break before/after multi-byte char
+          mbyte_join = 'M', -- no space before/after multi-byte char
+          mbyte_join2 = 'B', -- no space between multi-byte chars
+          one_letter = '1',
+          white_par = 'w', -- trailing white space continues paragr.
+          auto = 'a', -- automatic formatting
+          rigorous_tw = ']', -- respect textwidth rigorously
+          remove_coms = 'j', -- remove comment leaders when joining lines
+          period_abbr = 'p', -- don't break a single space after a period
+        },
+      },
       full_name = 'formatoptions',
       list = 'flags',
       scope = { 'buf' },
@@ -3781,17 +3944,15 @@ local options = {
       abbreviation = 'fp',
       defaults = '',
       desc = [=[
-        The name of an external program that will be used to format the lines
-        selected with the |gq| operator.  The program must take the input on
-        stdin and produce the output on stdout.  The Unix program "fmt" is
-        such a program.
-        If the 'formatexpr' option is not empty it will be used instead.
-        Otherwise, if 'formatprg' option is an empty string, the internal
-        format function will be used |C-indenting|.
-        Environment variables are expanded |:set_env|.  See |option-backslash|
-        about including spaces and backslashes.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
+        External program used to format lines with |gq|. Ignored if
+        'formatexpr' is set.
+
+        If empty, the internal |C-indenting| function will be used.
+
+        The program must take input on stdin and produce output on stdout. The
+        Unix program "fmt" is such a program. Environment variables are
+        expanded |:set_env|.  See |option-backslash| about including spaces
+        and backslashes.
       ]=],
       expand = true,
       full_name = 'formatprg',
@@ -3819,8 +3980,6 @@ local options = {
 
         This is a |global-local| option, so it can be set per buffer, for
         example when writing to a slow filesystem.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'fsync',
       scope = { 'global', 'buf' },
@@ -3847,7 +4006,7 @@ local options = {
         This is a scanf-like string that uses the same format as the
         'errorformat' option: see |errorformat|.
 
-        If ripgrep ('grepprg') is available, this option defaults to `%f:%l:%c:%m`.
+        Defaults to "%f:%l:%c:%m" if ripgrep ('grepprg') is available.
       ]=],
       full_name = 'grepformat',
       list = 'onecomma',
@@ -3865,28 +4024,31 @@ local options = {
         doc = [[see below]],
       },
       desc = [=[
-        Program to use for the |:grep| command.  This option may contain '%'
-        and '#' characters, which are expanded like when used in a command-
-        line.  The placeholder "$*" is allowed to specify where the arguments
-        will be included.  Environment variables are expanded |:set_env|.  See
-        |option-backslash| about including spaces and backslashes.
+        Program to use for the |:grep| command.
+        Note: if you change this then you must also update 'grepformat'.
+
+        May contain "%" and "#" characters, are expanded per |cmdline-special|.
+        The placeholder "$*" specifies where the arguments will be included.
+        Environment variables are expanded |:set_env|.  See |option-backslash|
+        about including spaces and backslashes.
+
         Special value: When 'grepprg' is set to "internal" the |:grep| command
         works like |:vimgrep|, |:lgrep| like |:lvimgrep|, |:grepadd| like
         |:vimgrepadd| and |:lgrepadd| like |:lvimgrepadd|.
-        See also the section |:make_makeprg|, since most of the comments there
-        apply equally to 'grepprg'.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
-        This option defaults to:
-        - `rg --vimgrep -uu ` if ripgrep is available (|:checkhealth|),
-        - `grep -HIn $* /dev/null` on Unix,
-        - `findstr /n $* nul` on Windows.
-        Ripgrep can perform additional filtering such as using .gitignore rules
-        and skipping hidden files. This is disabled by default (see the -u option)
-        to more closely match the behaviour of standard grep.
+
+        See also |:make_makeprg|, most of the comments there apply to 'grepprg'.
+
+        Defaults to:
+        - "rg --vimgrep -uu " if ripgrep is available (|:checkhealth|),
+        - "grep -HIn $* /dev/null" on Unix,
+        - "findstr /n $* nul" on Windows.
+
+        Ripgrep may perform additional filtering such as using .gitignore rules
+        and skipping hidden files. This is disabled by default (via "-u") to
+        more closely match the behaviour of standard grep.
         You can make ripgrep match Vim's case handling using the
-        -i/--ignore-case and -S/--smart-case options.
-        An |OptionSet| autocmd can be used to set it up to match automatically.
+        -i/--ignore-case and -S/--smart-case options. Handle |OptionSet| to
+        dynamically update 'grepprg' when e.g. 'ignorecase' is changed.
       ]=],
       expand = true,
       full_name = 'grepprg',
@@ -3985,6 +4147,7 @@ local options = {
 
         Examples of cursor highlighting: >vim
             highlight Cursor gui=reverse guifg=NONE guibg=NONE
+            " Note: gui=reverse overrides colors.
             highlight Cursor gui=NONE guifg=bg guibg=fg
         <
       ]=],
@@ -4000,10 +4163,11 @@ local options = {
       abbreviation = 'gfn',
       defaults = {
         if_true = macros('DFLT_GFN', 'string'),
-        doc = [[(MS-Windows) "Cascadia Code,Cascadia Mono,Consolas,Courier New,monospace"
-                     (Mac) "SF Mono,Menlo,Monaco,Courier New,monospace"
-                   (Linux) "Source Code Pro,DejaVu Sans Mono,Courier New,monospace"
-                  (others) "DejaVu Sans Mono,Courier New,monospace"]],
+        doc = [["DejaVu Sans Mono,Courier New,monospace"
+          Mac: "SF Mono,Menlo,Monaco,Courier New,monospace"
+          Linux: "Source Code Pro,DejaVu Sans Mono,Courier New,monospace"
+          MS-Windows: "Cascadia Code,Cascadia Mono,Consolas,Courier New,monospace"]],
+        meta = 'DFLT_GFN',
       },
       desc = [=[
         This is a list of fonts which will be used for the GUI version of Vim.
@@ -4144,9 +4308,9 @@ local options = {
         							*'go-d'*
           'd'	Use dark theme variant if available.
         							*'go-e'*
-          'e'	Add tab pages when indicated with 'showtabline'.
+          'e'	Add tabpages when indicated with 'showtabline'.
         	'guitablabel' can be used to change the text in the labels.
-        	When 'e' is missing a non-GUI tab pages line may be used.
+        	When 'e' is missing a non-GUI tabpages line may be used.
         	The GUI tabs are only supported on some systems, currently
         	Mac OS/X and MS-Windows.
         							*'go-i'*
@@ -4214,9 +4378,9 @@ local options = {
       abbreviation = 'gtl',
       defaults = '',
       desc = [=[
-        When non-empty describes the text to use in a label of the GUI tab
-        pages line.  When empty and when the result is empty Vim will use a
-        default label.  See |setting-guitablabel| for more info.
+        When non-empty describes the text to use in a label of the GUI
+        tabpages line.  When empty and when the result is empty Vim will use
+        a default label.  See |setting-guitablabel| for more info.
 
         The format of this option is like that of 'statusline'.
         'guitabtooltip' is used for the tooltip, see below.
@@ -4224,15 +4388,15 @@ local options = {
         modeline, see |sandbox-option|.
         This option cannot be set in a modeline when 'modelineexpr' is off.
 
-        Only used when the GUI tab pages line is displayed.  'e' must be
-        present in 'guioptions'.  For the non-GUI tab pages line 'tabline' is
+        Only used when the GUI tabpages line is displayed.  'e' must be
+        present in 'guioptions'.  For the non-GUI tabpages line 'tabline' is
         used.
       ]=],
       full_name = 'guitablabel',
       modelineexpr = true,
       redraw = { 'current_window' },
       scope = { 'global' },
-      short_desc = N_('GUI: custom label for a tab page'),
+      short_desc = N_('GUI: custom label for a tabpage'),
       type = 'string',
       immutable = true,
     },
@@ -4240,17 +4404,19 @@ local options = {
       abbreviation = 'gtt',
       defaults = '',
       desc = [=[
-        When non-empty describes the text to use in a tooltip for the GUI tab
-        pages line.  When empty Vim will use a default tooltip.
+        When non-empty describes the text to use in a tooltip for the GUI
+        tabpages line.  When empty Vim will use a default tooltip.
         This option is otherwise just like 'guitablabel' above.
         You can include a line break.  Simplest method is to use |:let|: >vim
         	let &guitabtooltip = "line one\nline two"
         <
+        This option cannot be set in a modeline when 'modelineexpr' is off.
       ]=],
       full_name = 'guitabtooltip',
+      modelineexpr = true,
       redraw = { 'current_window' },
       scope = { 'global' },
-      short_desc = N_('GUI: custom tooltip for a tab page'),
+      short_desc = N_('GUI: custom tooltip for a tabpage'),
       type = 'string',
       immutable = true,
     },
@@ -4259,8 +4425,7 @@ local options = {
       cb = 'did_set_helpfile',
       defaults = {
         if_true = macros('DFLT_HELPFILE', 'string'),
-        doc = [[(MS-Windows) "$VIMRUNTIME\doc\help.txt"
-                  (others) "$VIMRUNTIME/doc/help.txt"]],
+        doc = [["$VIMRUNTIME/doc/help.txt"]],
       },
       desc = [=[
         Name of the main help file.  All distributed help files should be
@@ -4270,8 +4435,6 @@ local options = {
         "$VIMRUNTIME/doc/help.txt".  If $VIMRUNTIME is not set, $VIM is also
         tried.  Also see |$VIMRUNTIME| and |option-backslash| about including
         spaces and backslashes.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'helpfile',
@@ -4572,7 +4735,9 @@ local options = {
       abbreviation = 'icm',
       cb = 'did_set_inccommand',
       defaults = 'nosplit',
-      values = { 'nosplit', 'split', '' },
+      schema = {
+        enum = { 'nosplit', 'split', '' },
+      },
       desc = [=[
         When nonempty, shows the effects of |:substitute|, |:smagic|,
         |:snomagic| and user commands with the |:command-preview| flag as you
@@ -4691,7 +4856,8 @@ local options = {
         command line has no uppercase characters, the added character is
         converted to lowercase.
         CTRL-R CTRL-W can be used to add the word at the end of the current
-        match, excluding the characters that were already typed.
+        match, excluding the characters that were already typed (starting from
+        the beginning of the word).
       ]=],
       full_name = 'incsearch',
       scope = { 'global' },
@@ -4982,8 +5148,9 @@ local options = {
     {
       abbreviation = 'jop',
       defaults = 'clean',
-      values = { 'stack', 'view', 'clean' },
-      flags = true,
+      schema = {
+        flags = { 'stack', 'view', 'clean' },
+      },
       deny_duplicates = true,
       desc = [=[
         List of words that change the behavior of the |jumplist|.
@@ -4999,7 +5166,6 @@ local options = {
         		the action occurred.
 
           clean         Remove unloaded buffers from the jumplist.
-        		EXPERIMENTAL: this flag may change in the future.
       ]=],
       full_name = 'jumpoptions',
       list = 'onecomma',
@@ -5026,6 +5192,7 @@ local options = {
       redraw = { 'statuslines', 'current_buffer' },
       scope = { 'buf' },
       short_desc = N_('name of a keyboard mapping'),
+      tags = { 'E544' },
       type = 'string',
       varname = 'p_keymap',
     },
@@ -5033,7 +5200,9 @@ local options = {
       abbreviation = 'km',
       cb = 'did_set_keymodel',
       defaults = '',
-      values = { 'startsel', 'stopsel' },
+      schema = {
+        set = { 'startsel', 'stopsel' },
+      },
       deny_duplicates = true,
       desc = [=[
         List of comma-separated words, which enable special things that keys
@@ -5056,25 +5225,30 @@ local options = {
       abbreviation = 'kp',
       defaults = {
         condition = 'MSWIN',
-        if_true = ':help',
+        if_true = ':help!',
         if_false = ':Man',
         doc = '":Man", Windows: ":help"',
       },
       desc = [=[
         Program to use for the |K| command.  Environment variables are
-        expanded |:set_env|.  ":help" may be used to access the Vim internal
-        help.  (Note that previously setting the global option to the empty
-        value did this, which is now deprecated.)
-        When the first character is ":", the command is invoked as a Vim
-        Ex command prefixed with [count].
-        When "man" or "man -s" is used, Vim will automatically translate
-        a [count] for the "K" command to a section number.
+        expanded |:set_env|.
+
+        Special cases:
+        - ":help" opens the |word| at cursor using |:help|.  (Note that
+          previously setting the global option to the empty value did this,
+          which is now deprecated.)
+        - ":help!" performs |:help!| (DWIM) on the |WORD| at cursor.
+        - If the value starts with ":", it is invoked as an Ex command
+          and [count] is passed as the first argument, if present.
+        - If "man" or "man -s", [count] is the manpage section number.
+
         See |option-backslash| about including spaces and backslashes.
+
         Example: >vim
+        	set keywordprg=:help!
         	set keywordprg=man\ -s
         	set keywordprg=:Man
-        <	This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
+        <
       ]=],
       expand = true,
       full_name = 'keywordprg',
@@ -5100,8 +5274,6 @@ local options = {
         mapped in Insert mode.
         Also consider setting 'langremap' to off, to prevent 'langmap' from
         applying to characters resulting from a mapping.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
 
         Example (for Greek, in UTF-8):				*greek*  >vim
             set langmap=ΑA,ΒB,ΨC,ΔD,ΕE,ΦF,ΓG,ΗH,ΙI,ΞJ,ΚK,ΛL,ΜM,ΝN,ΟO,ΠP,QQ,ΡR,ΣS,ΤT,ΘU,ΩV,WW,ΧX,ΥY,ΖZ,αa,βb,ψc,δd,εe,φf,γg,ηh,ιi,ξj,κk,λl,μm,νn,οo,πp,qq,ρr,σs,τt,θu,ωv,ςw,χx,υy,ζz
@@ -5205,6 +5377,10 @@ local options = {
         	1: only if there are at least two windows
         	2: always
         	3: always and ONLY the last window
+
+        Here "last window" means the last window in a column, i.e. the bottom-
+        most one, just above the command line.
+
         The screen looks nicer with a status line if you have several
         windows, but it takes another screen line. |status-line|
       ]=],
@@ -5338,7 +5514,9 @@ local options = {
       abbreviation = 'lop',
       cb = 'did_set_lispoptions',
       defaults = '',
-      values = { 'expr:0', 'expr:1' },
+      schema = {
+        set = { 'expr:0', 'expr:1' },
+      },
       deny_duplicates = true,
       desc = [=[
         Comma-separated list of items that influence the Lisp indenting when
@@ -5387,7 +5565,7 @@ local options = {
         The cursor is displayed at the start of the space a Tab character
         occupies, not at the end as usual in Normal mode.  To get this cursor
         position while displaying Tabs with spaces, use: >vim
-        	set list lcs=tab:\ \
+        	let &list = v:true | let &lcs = 'tab:  '
         <
         Note that list mode will also affect formatting (set with 'textwidth'
         or 'wrapmargin') when 'cpoptions' includes 'L'.  See 'listchars' for
@@ -5404,6 +5582,25 @@ local options = {
       cb = 'did_set_chars_option',
       defaults = 'tab:> ,trail:-,nbsp:+',
       deny_duplicates = true,
+      -- 'listchars' schema: generates `lcs_tab` (the `lcs_chars` dispatch table).
+      -- "tab"/"leadtab" fill a multi-char field; "multispace"/"leadmultispace" have no single
+      -- storage (field=false) and are handled specially in set_chars_option().
+      schema = {
+        chars = {
+          { 'eol', 'char' },
+          { 'extends', 'char', { field = 'ext' } },
+          { 'nbsp', 'char' },
+          { 'precedes', 'char', { field = 'prec' } },
+          { 'space', 'char' },
+          { 'tab', 'chars', { field = 'tab2' } },
+          { 'leadtab', 'chars', { field = 'leadtab2' } },
+          { 'lead', 'char' },
+          { 'trail', 'char' },
+          { 'conceal', 'char' },
+          { 'multispace', 'chars', { field = false } },
+          { 'leadmultispace', 'chars', { field = false } },
+        },
+      },
       desc = [=[
         Strings to use in 'list' mode and for the |:list| command.  It is a
         comma-separated list of string settings. *E1511*
@@ -5453,7 +5650,7 @@ local options = {
         		combine it with "tab:", for example: >vim
         			set listchars+=tab:>-,lead:.
         <
-        						*lcs-leadmultispace*
+                                        *lcs-leadmultispace* *indent-guides*
           leadmultispace:c...
         		Like the |lcs-multispace| value, but for leading
         		spaces only.  Also overrides |lcs-lead| for leading
@@ -5464,6 +5661,22 @@ local options = {
         <
         		Where "XXX" denotes the first non-blank characters in
         		the line.
+
+                        Combined with |lcs-leadtab|, this can be used to show
+                        "indentation guides" (vertical lines).
+        		For example, with 'shiftwidth' 2: >vim
+        			set list listchars=leadtab:\ \ │,tab:\ \ │,leadmultispace:\ \ │
+        <		For richer rendering (per-level colors, treesitter-aware
+        		scopes, etc.) use a third-party plugin.
+        						*lcs-leadtab*
+          leadtab:xy[z]
+        		Like |lcs-tab|, but only for leading tabs.  When
+        		omitted, the "tab" setting is used for leading tabs.
+        		|lcs-tab| must also be set for this to work. *E1572*
+        		You can combine it with "tab:", for example: >vim
+        			let &listchars = 'tab:>-,leadtab:. '
+        <			This shows leading tabs as periods(.) and other tabs
+        		as ">--".
         						*lcs-trail*
           trail:c	Character to show for trailing spaces.  When omitted,
         		trailing spaces are blank.  Overrides the "space" and
@@ -5504,7 +5717,7 @@ local options = {
       ]=],
       expand_cb = 'expand_set_chars_option',
       full_name = 'listchars',
-      list = 'onecomma',
+      list = 'onecommacolon',
       redraw = { 'current_window' },
       scope = { 'global', 'win' },
       short_desc = N_('characters for displaying in list mode'),
@@ -5548,8 +5761,6 @@ local options = {
         NOT used for the ":cf" command.  See 'errorfile' for that.
         Environment variables are expanded |:set_env|.
         See |option-backslash| about including spaces and backslashes.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'makeef',
@@ -5600,8 +5811,7 @@ local options = {
         <	The placeholder "$*" can be given (even multiple times) to specify
         where the arguments will be included, for example: >vim
             set makeprg=latex\ \\\\nonstopmode\ \\\\input\\{$*}
-        <	This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
+        <
       ]=],
       expand = true,
       full_name = 'makeprg',
@@ -5756,29 +5966,35 @@ local options = {
     {
       abbreviation = 'mopt',
       cb = 'did_set_messagesopt',
-      defaults = 'hit-enter,history:500',
-      values = { 'hit-enter', 'wait:', 'history:' },
-      flags = true,
+      defaults = 'hit-enter,history:500,progress:c',
+      schema = {
+        flags = { 'hit-enter', 'wait:', 'history:', 'progress:' },
+      },
       deny_duplicates = true,
       desc = [=[
         Option settings for outputting messages.  It can consist of the
         following items.  Items must be separated by a comma.
 
-        hit-enter	Use a |hit-enter| prompt when the message is longer than
-        		'cmdheight' size.
-
-        wait:{n}	Instead of using a |hit-enter| prompt, simply wait for
-        		{n} milliseconds so that the user has a chance to read
-        		the message.  The maximum value of {n} is 10000.  Use
-        		0 to disable the wait (but then the user may miss an
-        		important message).
-        		This item is ignored when "hit-enter" is present, but
-        		required when "hit-enter" is not present.
-
         history:{n}	Determines how many entries are remembered in the
         		|:messages| history.  The maximum value is 10000.
         		Setting it to zero clears the message history.
         		This item must always be present.
+
+        hit-enter	Use a |hit-enter| prompt when the message is longer than
+        		'cmdheight' size.
+
+        progress:{s}	Determines where to show progress messages.
+        		Valid values are:
+        		  - empty: Progress messages not shown in cmdline.
+        		  - "c": Progress messages are shown in cmdline.
+
+        wait:{n}	Deprecated with |ui2|.
+        		Instead of a |hit-enter| prompt, simply wait for {n}
+        		milliseconds so the user has a chance to read the
+        		message.  Maximum {n} is 10000.  Use 0 to disable the
+        		wait (user won't see any "hit-enter" messages).
+        		Ignored when "hit-enter" is present, but required when
+        		"hit-enter" is not present.
       ]=],
       full_name = 'messagesopt',
       list = 'onecommacolon',
@@ -5825,8 +6041,6 @@ local options = {
         <	If you have less than 512 Mbyte |:mkspell| may fail for some
         languages, no matter what you set 'mkspellmem' to.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'mkspellmem',
@@ -5860,8 +6074,6 @@ local options = {
         When on allow some options that are an expression to be set in the
         modeline.  Check the option for whether it is affected by
         'modelineexpr'.  Also see |modeline|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'modelineexpr',
       scope = { 'global' },
@@ -5877,7 +6089,6 @@ local options = {
         If 'modeline' is on 'modelines' gives the number of lines that is
         checked for set commands.  If 'modeline' is off or 'modelines' is zero
         no lines are checked.  See |modeline|.
-
       ]=],
       full_name = 'modelines',
       scope = { 'global' },
@@ -5924,8 +6135,13 @@ local options = {
         result of a BufNewFile, BufRead/BufReadPost, BufWritePost,
         FileAppendPost or VimLeave autocommand event.  See |gzip-example| for
         an explanation.
-        When 'buftype' is "nowrite" or "nofile" this option may be set, but
+
+        When 'buftype' is "prompt", 'modified' is not implicitly set when the
+        buffer is changed, but a user or plugin may explicitly set it.
+
+        When 'buftype' is "nowrite" or "nofile", this option may be set, but
         will be ignored.
+
         Note that the text may actually be the same, e.g. 'modified' is set
         when using "rA" on an "A".
       ]=],
@@ -5992,6 +6208,19 @@ local options = {
         'selectmode'	whether to start Select mode or Visual mode
       ]=],
       expand_cb = 'expand_set_mouse',
+      -- Generates kMouse* flag constants. MOUSE_A/MOUSE_ALL stay hand-defined in option_vars.h.
+      schema = {
+        flagchars = {
+          normal = 'n', -- use mouse in Normal mode
+          visual = 'v', -- use mouse in Visual/Select mode
+          insert = 'i', -- use mouse in Insert mode
+          command = 'c', -- use mouse in Command-line mode
+          help = 'h', -- use mouse in help buffers
+          ['return'] = 'r', -- use mouse for hit-return message
+          none = ' ', -- don't use Visual selection
+          nonef = 'x', -- forced modeless selection
+        },
+      },
       full_name = 'mouse',
       list = 'flags',
       scope = { 'global' },
@@ -6034,7 +6263,9 @@ local options = {
     {
       abbreviation = 'mousem',
       defaults = 'popup_setpos',
-      values = { 'extend', 'popup', 'popup_setpos' },
+      schema = {
+        enum = { 'extend', 'popup', 'popup_setpos' },
+      },
       desc = [=[
         Sets the model to use for the mouse.  The name mostly specifies what
         the right mouse button is used for:
@@ -6050,7 +6281,10 @@ local options = {
         		be acted upon, i.e. no cursor move.  This implies of
         		course, that right clicking outside a selection will
         		end Visual mode.
-        Overview of what button does what for each model:
+
+        For a detailed description of 'mousemodel' behaviour see
+        |mouse-mode-table|.  Overview of what button does what for each model:
+
         mouse		    extend		popup(_setpos) ~
         left click	    place cursor	place cursor
         left drag	    start selection	start selection
@@ -6111,7 +6345,9 @@ local options = {
     {
       cb = 'did_set_mousescroll',
       defaults = 'ver:3,hor:6',
-      values = { 'hor:', 'ver:' },
+      schema = {
+        dict = { { 'hor', 'num' }, { 'ver', 'num' } },
+      },
       desc = [=[
         This option controls the number of lines / columns to scroll by when
         scrolling with a mouse wheel (|scroll-mouse-wheel|). The option is
@@ -6136,7 +6372,7 @@ local options = {
       scope = { 'global' },
       short_desc = N_('amount to scroll by when scrolling with a mouse'),
       tags = { 'E5080' },
-      type = 'string',
+      type = 'string', -- OptKeyDict_mousescroll
       varname = 'p_mousescroll',
       vi_def = true,
     },
@@ -6232,7 +6468,9 @@ local options = {
     {
       abbreviation = 'nf',
       defaults = 'bin,hex',
-      values = { 'bin', 'octal', 'hex', 'alpha', 'unsigned', 'blank' },
+      schema = {
+        set = { 'bin', 'octal', 'hex', 'alpha', 'unsigned', 'blank' },
+      },
       deny_duplicates = true,
       desc = [=[
         This defines what bases Vim will consider for numbers when using the
@@ -6351,8 +6589,6 @@ local options = {
         more information.
         This option is usually set by a filetype plugin:
         |:filetype-plugin-on|
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'omnifunc',
       func = true,
@@ -6388,9 +6624,6 @@ local options = {
         See |:map-operator| for more info and an example.  The value can be
         the name of a function, a |lambda| or a |Funcref|.  See
         |option-value-function| for more information.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'operatorfunc',
       func = true,
@@ -6399,6 +6632,22 @@ local options = {
       short_desc = N_('function to be called for |g@| operator'),
       type = 'string',
       varname = 'p_opfunc',
+    },
+    {
+      abbreviation = 'plf',
+      defaults = '$XDG_CONFIG_HOME/nvim/nvim-pack-lock.json',
+      deny_duplicates = true,
+      desc = [=[
+        Path of |vim.pack-lockfile|. Must be set before the first usage of any
+        |vim.pack| function. Environment variables are expanded |:set_env|.
+      ]=],
+      expand = 'nodefault',
+      full_name = 'packlockfile',
+      scope = { 'global' },
+      secure = true,
+      short_desc = N_('path of vim.pack lockfile'),
+      type = 'string',
+      varname = 'p_plf',
     },
     {
       abbreviation = 'pp',
@@ -6413,8 +6662,6 @@ local options = {
         Directories used to find packages.
         See |packages| and |packages-runtimepath|.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'packpath',
@@ -6464,8 +6711,6 @@ local options = {
       desc = [=[
         Expression which is evaluated to apply a patch to a file and generate
         the resulting new version of the file.  See |diff-patchexpr|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'patchexpr',
       scope = { 'global' },
@@ -6603,6 +6848,50 @@ local options = {
       varname = 'p_pvh',
     },
     {
+      abbreviation = 'pvp',
+      cb = 'did_set_previewpopup',
+      schema = {
+        dict = {
+          { 'height', 'num' },
+          { 'width', 'num' },
+          -- Only the named 'winborder' styles; a custom (comma) border can't be given here.
+          {
+            'border',
+            'enum',
+            { values = { 'double', 'single', 'shadow', 'rounded', 'solid', 'bold', 'none' } },
+          },
+        },
+      },
+      expand_cb = 'expand_set_popupoption',
+      defaults = { if_true = '' },
+      desc = [=[
+        When not empty a floating window is used for commands that would open
+        a preview window.  See |preview-popup|.
+        The option is a comma-separated list of these items:
+           height  Height of the window.  When omitted, it is derived from
+                   the content.
+           width   Width of the window.  When omitted, it is derived from
+                   the content.
+           border  One of the 'winborder' styles.  When omitted, 'winborder'
+                   is used.  A custom (comma separated) border cannot be
+                   given here, use 'winborder'.
+        The window background uses |hl-NormalFloat| and the border uses
+        |hl-FloatBorder|.
+        Not used for the insert completion info, add "popup" to 'completeopt'
+        for that.
+
+        Example: >vim
+        	set previewpopup=height:10,width:60,border:rounded
+        <
+      ]=],
+      full_name = 'previewpopup',
+      list = 'commacolon',
+      scope = { 'global' },
+      short_desc = N_('use a floating window for preview'),
+      type = 'string',
+      varname = 'p_pvp',
+    },
+    {
       abbreviation = 'pvw',
       cb = 'did_set_previewwindow',
       defaults = false,
@@ -6657,11 +6946,16 @@ local options = {
       scope = { 'global' },
       cb = 'did_set_pumborder',
       defaults = { if_true = '' },
-      values = { '', 'double', 'single', 'shadow', 'rounded', 'solid', 'bold', 'none' },
+      schema = {
+        set = { '', 'double', 'single', 'shadow', 'rounded', 'solid', 'bold', 'none' },
+      },
       desc = [=[
         Defines the default border style of popupmenu windows. See 'winborder' for
         valid values. |hl-PmenuBorder| is used for highlighting the border, and when
         style is "shadow" the |hl-PmenuShadow| and |hl-PmenuShadowThrough| groups are used.
+
+        This option also applies to mouse popup menus when 'mousemodel' is set to
+        "popup" or "popup_setpos", which will display borders using the same style.
       ]=],
       short_desc = N_('border of popupmenu'),
       type = 'string',
@@ -6719,9 +7013,6 @@ local options = {
         Specifies the python version used for pyx* functions and commands
         |python_x|.  As only Python 3 is supported, this always has the value
         `3`. Setting any other value is an error.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'pyxversion',
       scope = { 'global' },
@@ -6746,9 +7037,6 @@ local options = {
 
         It is not allowed to change text or jump to another window while
         evaluating 'qftf' |textlock|.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'quickfixtextfunc',
       func = true,
@@ -6799,15 +7087,16 @@ local options = {
     {
       abbreviation = 'rdb',
       defaults = '',
-      values = {
-        'compositor',
-        'nothrottle',
-        'invalid',
-        'nodelta',
-        'line',
-        'flush',
+      schema = {
+        flags = {
+          'compositor',
+          'nothrottle',
+          'invalid',
+          'nodelta',
+          'line',
+          'flush',
+        },
       },
-      flags = true,
       desc = [=[
         Flags to change the way redrawing works, for debugging purposes.
         Most useful with 'writedelay' set to some reasonable value.
@@ -6980,7 +7269,9 @@ local options = {
     {
       abbreviation = 'rlc',
       defaults = 'search',
-      values = { 'search' },
+      schema = {
+        set = { 'search' },
+      },
       desc = [=[
         Each word in this option enables the command line editing to work in
         right-to-left mode for a group of commands:
@@ -7046,6 +7337,13 @@ local options = {
         Example: >vim
         	set rulerformat=%15(%c%V\ %p%%%)
         <
+        This looks like an item group, but there are some differences in this
+        particular case.  Most notably, the width is fixed and not a minimum,
+        and the ruler is left-aligned, whereas the alignment of item groups is
+        configurable and right-aligned by default.
+
+        When |ui2| is enabled, the ruler no longer has a fixed width and the
+        item group syntax has no special meaning for 'rulerformat'.
       ]=],
       full_name = 'rulerformat',
       modelineexpr = true,
@@ -7146,8 +7444,6 @@ local options = {
 
         With |--clean| the home directory entries are not included.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = 'nodefault',
       full_name = 'runtimepath',
@@ -7191,9 +7487,9 @@ local options = {
         Maximum number of lines kept beyond the visible screen. Lines at the
         top are deleted if new lines exceed this limit.
         Minimum is 1, maximum is 1000000.
-        Only in |terminal| buffers.
+        Only in |terminal| and |prompt-buffer| buffers.
 
-        Note: Lines that are not visible and kept in scrollback are not
+        Note: Lines that are not visible and kept in terminal scrollback are not
         reflown when the terminal buffer is resized horizontally.
       ]=],
       full_name = 'scrollback',
@@ -7208,15 +7504,16 @@ local options = {
       cb = 'did_set_scrollbind',
       defaults = false,
       desc = [=[
-        See also |scroll-binding|.  When this option is set, scrolling the
-        current window also scrolls other scrollbind windows (windows that
-        also have this option set).  This option is useful for viewing the
-        differences between two versions of a file, see 'diff'.
-        See 'scrollopt' for options that determine how this option should be
-        interpreted.
-        This option is mostly reset when splitting a window to edit another
-        file.  This means that ":split | edit file" results in two windows
-        with scroll-binding, but ":split file" does not.
+        Enables synchronized scrolling (in all windows with this option set).
+        Useful for comparing two versions of a file, see 'diff'.
+        Behavior is controlled by 'scrollopt'. See |scroll-binding|.
+
+        This option is (usually) reset when splitting a window to edit another
+        file: ":split | edit file" results in two windows with scroll-binding,
+        but ":split file" does not.
+
+        Note: Consider calling |:syncbind| on |WinResized|, |WinEnter| events
+        (scoped to relevant buffers).
       ]=],
       full_name = 'scrollbind',
       scope = { 'win' },
@@ -7247,8 +7544,8 @@ local options = {
         Minimal number of screen lines to keep above and below the cursor.
         This will make some context visible around where you are working.  If
         you set it to a very large value (999) the cursor line will always be
-        in the middle of the window (except at the start or end of the file or
-        when long lines wrap).
+        in the middle of the window (except at the start or end of the file,
+        see 'scrolloffpad', or when long lines wrap).
         After using the local value, go back the global value with one of
         these two: >vim
         	setlocal scrolloff<
@@ -7262,9 +7559,40 @@ local options = {
       varname = 'p_so',
     },
     {
+      abbreviation = 'sop',
+      defaults = 0,
+      desc = [=[
+        When 'scrolloff' and 'scrolloffpad' are greater than zero, allow
+        the cursor to remain centered when at the end of the file.
+        Normally, 'scrolloff' will not keep the cursor centered at the
+        end of the file.
+
+        A value of 0 disables this feature.  Any value above 0 enables it.
+        For a window-local value, -1 means to use the global value.
+        Values below -1 are invalid.
+
+        Example: >vim
+        	:set scrolloff=99 scrolloffpad=1
+        <
+
+        After using the local value, go back the global value with one of
+        these two: >vim
+        	setlocal scrolloffpad<
+        	setlocal scrolloffpad=-1
+        <
+      ]=],
+      full_name = 'scrolloffpad',
+      scope = { 'global', 'win' },
+      short_desc = N_('vertically center cursor even at end of file'),
+      type = 'number',
+      varname = 'p_sop',
+    },
+    {
       abbreviation = 'sbo',
       defaults = 'ver,jump',
-      values = { 'ver', 'hor', 'jump' },
+      schema = {
+        set = { 'ver', 'hor', 'jump' },
+      },
       deny_duplicates = true,
       desc = [=[
         This is a comma-separated list of words that specifies how
@@ -7329,7 +7657,9 @@ local options = {
       abbreviation = 'sel',
       cb = 'did_set_selection',
       defaults = 'inclusive',
-      values = { 'inclusive', 'exclusive', 'old' },
+      schema = {
+        enum = { 'inclusive', 'exclusive', 'old' },
+      },
       desc = [=[
         This option defines the behavior of the selection.  It is only used
         in Visual and Select mode.
@@ -7365,7 +7695,9 @@ local options = {
     {
       abbreviation = 'slm',
       defaults = '',
-      values = { 'mouse', 'key', 'cmd' },
+      schema = {
+        set = { 'mouse', 'key', 'cmd' },
+      },
       deny_duplicates = true,
       desc = [=[
         This is a comma-separated list of words, which specifies when to start
@@ -7388,27 +7720,28 @@ local options = {
       cb = 'did_set_sessionoptions',
       defaults = 'blank,buffers,curdir,folds,help,tabpages,winsize,terminal',
       -- Also used for 'viewoptions'.
-      values = {
-        'buffers',
-        'winpos',
-        'resize',
-        'winsize',
-        'localoptions',
-        'options',
-        'help',
-        'blank',
-        'globals',
-        'slash',
-        'unix',
-        'sesdir',
-        'curdir',
-        'folds',
-        'cursor',
-        'tabpages',
-        'terminal',
-        'skiprtp',
+      schema = {
+        flags = {
+          'buffers',
+          'winpos',
+          'resize',
+          'winsize',
+          'localoptions',
+          'options',
+          'help',
+          'blank',
+          'globals',
+          'slash',
+          'unix',
+          'sesdir',
+          'curdir',
+          'folds',
+          'cursor',
+          'tabpages',
+          'terminal',
+          'skiprtp',
+        },
       },
-      flags = true,
       deny_duplicates = true,
       desc = [=[
         Changes the effect of the |:mksession| command.  It is a comma-
@@ -7434,9 +7767,9 @@ local options = {
         		will become the current directory (useful with
         		projects accessed over a network from different
         		systems)
-           tabpages	all tab pages; without this only the current tab page
+           tabpages	all tabpages; without this only the current tabpage
         		is restored, so that you can make a session for each
-        		tab page separately
+        		tabpage separately
            terminal	include terminal windows where the command can be
         		restored
            winpos	position of the whole Vim window
@@ -7571,9 +7904,6 @@ local options = {
 
         When setting 'shada' from an empty value you can use |:rshada| to
         load the contents of the file, this is not done automatically.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'shada',
       list = 'onecomma',
@@ -7595,8 +7925,6 @@ local options = {
         This option can be set with the |-i| command line flag.  The |--clean|
         command line flag sets it to "NONE".
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'shadafile',
@@ -7669,8 +7997,6 @@ local options = {
            " Workaround (may not be needed in future version of pwsh):
            let $__SuppressAnsiEscapeSequences = 1
         <
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'shell',
@@ -7684,10 +8010,9 @@ local options = {
     {
       abbreviation = 'shcf',
       defaults = {
-        condition = 'MSWIN',
-        if_false = '-c',
-        if_true = '/s /c',
-        doc = '"-c"; Windows: "/s /c"',
+        if_true = '-c',
+        doc = [["-c"; Windows, when 'shell'
+               contains "cmd" somewhere: "/s /c"]],
       },
       desc = [=[
         Flag passed to the shell to execute "!" and ":!" commands; e.g.,
@@ -7699,8 +8024,6 @@ local options = {
         See |option-backslash| about including spaces and backslashes.
         See |shell-unquoting| which talks about separating this option into
         multiple arguments.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'shellcmdflag',
       scope = { 'global' },
@@ -7711,6 +8034,7 @@ local options = {
     },
     {
       abbreviation = 'sp',
+      cb = 'did_set_shellpipe_redir',
       defaults = {
         condition = 'MSWIN',
         if_false = '| tee',
@@ -7727,12 +8051,12 @@ local options = {
         For MS-Windows the default is "2>&1| tee".  The stdout and stderr are
         saved in a file and echoed to the screen.
         For Unix the default is "| tee".  The stdout of the compiler is saved
-        in a file and echoed to the screen.  If the 'shell' option is "csh" or
-        "tcsh" after initializations, the default becomes "|& tee".  If the
-        'shell' option is "sh", "ksh", "mksh", "pdksh", "zsh", "zsh-beta",
-        "bash", "fish", "ash" or "dash" the default becomes "2>&1| tee".  This
-        means that stderr is also included.  Before using the 'shell' option a
-        path is removed, thus "/bin/sh" uses "sh".
+        in a file and echoed to the screen.  If the 'shell' option contains
+        "csh" (e.g. "tcsh") after initializations, the default becomes
+        "|& tee".  Otherwise, if it contains "sh" (e.g. "bash", "zsh"), the
+        default becomes "2>&1| tee".  This means that stderr is also included.
+        Before using the 'shell' option a path is removed, thus "/bin/sh" uses
+        "sh".
         The initialization of this option is done after reading the vimrc
         and the other initializations, so that when the 'shell' option is set
         there, the 'shellpipe' option changes automatically, unless it was
@@ -7747,8 +8071,7 @@ local options = {
         Note: When using a pipe like "| tee", you'll lose the exit code of the
         shell command.  This might be configurable by your shell, look for
         the pipefail option (for bash and zsh, use ":set -o pipefail").
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
+        Only a single "%s" value is allowed.
       ]=],
       full_name = 'shellpipe',
       scope = { 'global' },
@@ -7774,8 +8097,6 @@ local options = {
         or bash, where it should be "\"".  The default is adjusted according
         the value of 'shell', to reduce the need to set this option by the
         user.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'shellquote',
       scope = { 'global' },
@@ -7786,6 +8107,7 @@ local options = {
     },
     {
       abbreviation = 'srr',
+      cb = 'did_set_shellpipe_redir',
       defaults = {
         condition = 'MSWIN',
         if_false = '>',
@@ -7799,12 +8121,12 @@ local options = {
         The name of the temporary file can be represented by "%s" if necessary
         (the file name is appended automatically if no %s appears in the value
         of this option).
-        The default is ">".  For Unix, if the 'shell' option is "csh" or
-        "tcsh" during initializations, the default becomes ">&".  If the
-        'shell' option is "sh", "ksh", "mksh", "pdksh", "zsh", "zsh-beta",
-        "bash" or "fish", the default becomes ">%s 2>&1".  This means that
-        stderr is also included.  For Win32, the Unix checks are done and
-        additionally "cmd" is checked for, which makes the default ">%s 2>&1".
+        The default is ">".  For Unix, if the 'shell' option contains "csh"
+        (e.g. "tcsh") during initializations, the default becomes ">&".
+        Otherwise, if it contains "sh" (e.g. "bash", "zsh"), the default
+        becomes ">%s 2>&1". This means that stderr is also included.  For
+        Win32, the Unix checks are done and additionally "cmd" is checked
+        for, which makes the default ">%s 2>&1".
         Also, the same names with ".exe" appended are checked for.
         The initialization of this option is done after reading the vimrc
         and the other initializations, so that when the 'shell' option is set
@@ -7812,8 +8134,8 @@ local options = {
         explicitly set before.
         In the future pipes may be used for filtering and this option will
         become obsolete (at least for Unix).
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
+        							*E1577*
+        Only a single "%s" item is allowed in the option value.
       ]=],
       full_name = 'shellredir',
       scope = { 'global' },
@@ -7824,12 +8146,12 @@ local options = {
     },
     {
       abbreviation = 'ssl',
-      cb = 'did_set_shellslash',
       defaults = {
         condition = 'MSWIN',
         if_true = false,
         if_false = true,
-        doc = 'on, Windows: off',
+        doc = [[on; Windows: off, except when 'shell'
+               contains "sh" somewhere]],
       },
       desc = [=[
         		only modifiable in MS-Windows
@@ -7880,8 +8202,6 @@ local options = {
         When 'shellxquote' is set to "(" then the characters listed in this
         option will be escaped with a '^' character.  This makes it possible
         to execute most external commands with cmd.exe.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'shellxescape',
       scope = { 'global' },
@@ -7893,10 +8213,9 @@ local options = {
     {
       abbreviation = 'sxq',
       defaults = {
-        condition = 'MSWIN',
-        if_false = '',
-        if_true = '"',
-        doc = '"", Windows: "\\""',
+        if_true = '',
+        doc = [[""; Windows, when 'shell'
+               contains "cmd" somewhere: "\""]],
       },
       desc = [=[
         Quoting character(s), put around the command passed to the shell, for
@@ -7906,8 +8225,6 @@ local options = {
         When the value is '(' then ')' is appended.  When the value is '"('
         then ')"' is appended.
         When the value is '(' then also see 'shellxescape'.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'shellxquote',
       scope = { 'global' },
@@ -7951,8 +8268,9 @@ local options = {
       cb = 'did_set_shortmess',
       defaults = 'ltToOCF',
       desc = [=[
-        This option helps to avoid all the |hit-enter| prompts caused by file
-        messages, for example with CTRL-G, and to avoid some other messages.
+        Controls display of file messages (e.g. CTRL-G) and various other
+        messages.
+
         It is a list of flags:
          flag	meaning when present	~
           l	use "999L, 888B" instead of "999 lines, 888 bytes"	*shm-l*
@@ -7999,6 +8317,9 @@ local options = {
         	search count statistics.  The maximum limit can be set with
         	the 'maxsearchcount' option, see also |searchcount()|
         	function.
+          u	don't give undo and redo messages like			*shm-u*
+        	"1 line less; before #1  1 second ago", "Already at oldest
+        	change" or "Already at newest change"
 
         This gives you the opportunity to avoid that a change between buffers
         requires you to hit <Enter>, but still gives as useful a message as
@@ -8010,6 +8331,30 @@ local options = {
             shm=at	Abbreviation, and truncate message when necessary.
       ]=],
       expand_cb = 'expand_set_shortmess',
+      -- Generates kShm* flag constants; SHM_ALL_ABBREVIATIONS stays hand-defined in option_vars.h.
+      schema = {
+        flagchars = {
+          ro = 'r', -- Readonly.
+          mod = 'm', -- Modified.
+          lines = 'l', -- "L" instead of "lines".
+          wri = 'w', -- "[w]" instead of "written".
+          abbreviations = 'a', -- Use abbreviations from SHM_ALL_ABBREVIATIONS.
+          write = 'W', -- Don't use "written" at all.
+          trunc = 't', -- Truncate file messages.
+          truncall = 'T', -- Truncate all messages.
+          over = 'o', -- Overwrite file messages.
+          overall = 'O', -- Overwrite more messages.
+          search = 's', -- No search hit bottom messages.
+          attention = 'A', -- No ATTENTION messages.
+          intro = 'I', -- Intro messages.
+          completionmenu = 'c', -- Completion menu messages.
+          completionscan = 'C', -- Completion scanning messages.
+          recording = 'q', -- No recording message.
+          fileinfo = 'F', -- No file info messages.
+          searchcount = 'S', -- No search stats: '[1/10]'.
+          undo = 'u', -- No undo messages.
+        },
+      },
       full_name = 'shortmess',
       list = 'flags',
       scope = { 'global' },
@@ -8073,7 +8418,9 @@ local options = {
       abbreviation = 'sloc',
       cb = 'did_set_showcmdloc',
       defaults = 'last',
-      values = { 'last', 'statusline', 'tabline' },
+      schema = {
+        enum = { 'last', 'statusline', 'tabline' },
+      },
       desc = [=[
         This option can be used to display the (partially) entered command in
         another location.  Possible values are:
@@ -8157,19 +8504,15 @@ local options = {
       cb = 'did_set_showtabline',
       defaults = 1,
       desc = [=[
-        The value of this option specifies when the line with tab page labels
-        will be displayed:
+        Specifies when the |tabpage| labels will be displayed:
         	0: never
-        	1: only if there are at least two tab pages
+        	1: only if there are at least two tabpages
         	2: always
-        This is both for the GUI and non-GUI implementation of the tab pages
-        line.
-        See |tab-page| for more information about tab pages.
       ]=],
       full_name = 'showtabline',
       redraw = { 'all_windows', 'ui_option' },
       scope = { 'global' },
-      short_desc = N_('tells when the tab pages line is displayed'),
+      short_desc = N_('tells when the tabpages line is displayed'),
       type = 'number',
       varname = 'p_stal',
     },
@@ -8224,29 +8567,31 @@ local options = {
       abbreviation = 'scl',
       cb = 'did_set_signcolumn',
       defaults = 'auto',
-      values = {
-        'yes',
-        'no',
-        'auto',
-        'auto:1',
-        'auto:2',
-        'auto:3',
-        'auto:4',
-        'auto:5',
-        'auto:6',
-        'auto:7',
-        'auto:8',
-        'auto:9',
-        'yes:1',
-        'yes:2',
-        'yes:3',
-        'yes:4',
-        'yes:5',
-        'yes:6',
-        'yes:7',
-        'yes:8',
-        'yes:9',
-        'number',
+      schema = {
+        enum = {
+          'yes',
+          'no',
+          'auto',
+          'auto:1',
+          'auto:2',
+          'auto:3',
+          'auto:4',
+          'auto:5',
+          'auto:6',
+          'auto:7',
+          'auto:8',
+          'auto:9',
+          'yes:1',
+          'yes:2',
+          'yes:3',
+          'yes:4',
+          'yes:5',
+          'yes:6',
+          'yes:7',
+          'yes:8',
+          'yes:9',
+          'number',
+        },
       },
       desc = [=[
         When and how to draw the signcolumn.  Valid values are:
@@ -8447,8 +8792,6 @@ local options = {
         'spellfile' is set to it, for entries in 'spelllang' only files
         without region name will be found.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'spellfile',
@@ -8493,7 +8836,7 @@ local options = {
         encoding is used, Vim doesn't check it.
         How the related spell files are found is explained here: |spell-load|.
 
-        If the |spellfile.lua| plugin is active and you use a language name
+        If the |package-spellfile| plugin is active and you use a language name
         for which Vim cannot find the .spl file in 'runtimepath' the plugin
         will ask you if you want to download the file.
 
@@ -8515,8 +8858,9 @@ local options = {
       abbreviation = 'spo',
       cb = 'did_set_spelloptions',
       defaults = '',
-      values = { 'camel', 'noplainbuffer' },
-      flags = true,
+      schema = {
+        flags = { 'camel', 'noplainbuffer' },
+      },
       deny_duplicates = true,
       desc = [=[
         A comma-separated list of options for spell checking:
@@ -8542,7 +8886,9 @@ local options = {
       cb = 'did_set_spellsuggest',
       defaults = 'best',
       -- Keep this in sync with spell_check_sps().
-      values = { 'best', 'fast', 'double', 'expr:', 'file:', 'timeout:' },
+      schema = {
+        set = { 'best', 'fast', 'double', 'expr:', 'file:', 'timeout:' },
+      },
       deny_duplicates = true,
       desc = [=[
         Methods used for spelling suggestions.  Both for the |z=| command and
@@ -8608,8 +8954,6 @@ local options = {
         appear several times in any order.  Example: >vim
         	set sps=file:~/.config/nvim/sugg,best,expr:MySuggest()
         <	Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'spellsuggest',
@@ -8617,6 +8961,7 @@ local options = {
       scope = { 'global' },
       secure = true,
       short_desc = N_('method(s) used to suggest spelling corrections'),
+      tags = { 'E5700' },
       type = 'string',
       varname = 'p_sps',
     },
@@ -8635,8 +8980,11 @@ local options = {
     },
     {
       abbreviation = 'spk',
+      cb = 'did_set_splitkeep',
       defaults = 'cursor',
-      values = { 'cursor', 'screen', 'topline' },
+      schema = {
+        enum = { 'cursor', 'screen', 'topline' },
+      },
       desc = [=[
         The value of this option determines the scroll behavior when opening,
         closing or resizing horizontal splits.
@@ -8726,11 +9074,6 @@ local options = {
         When using |v:relnum|, keep in mind that cursor movement by itself will
         not cause the 'statuscolumn' to update unless 'relativenumber' is set.
 
-        NOTE: The %@ click execute function item is supported as well but the
-        specified function will be the same for each row in the same column.
-        It cannot be switched out through a dynamic 'statuscolumn' format, the
-        handler should be written with this in mind.
-
         Examples: >vim
         	" Line number with bar separator and click handlers:
         	set statuscolumn=%@SignCb@%s%=%T%@NumCb@%l│%T
@@ -8765,11 +9108,13 @@ local options = {
         if_true = table.concat({
           '%<',
           '%f %h%w%m%r ',
+          "%{% v:lua.require('vim._core.util').term_exitcode() %}",
           '%=',
+          "%{% luaeval('(package.loaded[''vim.ui''] and vim.api.nvim_get_current_win() == tonumber(vim.g.actual_curwin or -1) and vim.ui.progress_status()) or '''' ')%}",
           "%{% &showcmdloc == 'statusline' ? '%-10.S ' : '' %}",
           "%{% exists('b:keymap_name') ? '<'..b:keymap_name..'> ' : '' %}",
           "%{% &busy > 0 ? '◐ ' : '' %}",
-          "%{% luaeval('(package.loaded[''vim.diagnostic''] and #vim.diagnostic.count() ~= 0 and vim.diagnostic.status() .. '' '') or '''' ') %}",
+          "%{% luaeval('(package.loaded[''vim.diagnostic''] and next(vim.diagnostic.count()) and vim.diagnostic.status() .. '' '') or '''' ') %}",
           "%{% &ruler ? ( &rulerformat == '' ? '%-14.(%l,%c%V%) %P' : &rulerformat ) : '' %}",
         }),
         doc = 'is very long',
@@ -8777,11 +9122,13 @@ local options = {
       desc = [=[
         Sets the |status-line|.
 
-        The option consists of printf style '%' items interspersed with
-        normal text.  Each status line item is of the form:
+        Contains printf-style "%" items interspersed with normal text, where
+        each item has the form: >
           %-0{minwid}.{maxwid}{item}
-        All fields except the {item} are optional.  A single percent sign can
-        be given as "%%".
+        <
+        All fields except {item} are optional.  Use "%%" to show a literal "%"
+        char.  Setting to empty (`:set statusline=`) sets the global value to
+        the default.
 
         						*stl-%!*
         When the option starts with "%!" then it is used as an expression,
@@ -8861,7 +9208,8 @@ local options = {
         { NF  Evaluate expression between "%{" and "}" and substitute result.
               Note that there is no "%" before the closing "}".  The
               expression cannot contain a "}" character, call a function to
-              work around that.  See |stl-%{| below.
+              work around that.  See |stl-%{| below.  Use "%0{" to insert the
+              result verbatim.
         `{%` -  This is almost same as "{" except the result of the expression is
               re-evaluated as a statusline format string.  Thus if the
               return value of expr contains "%" items they will get expanded.
@@ -8877,14 +9225,14 @@ local options = {
         ( -   Start of item group.  Can be used for setting the width and
               alignment of a section.  Must be followed by %) somewhere.
         ) -   End of item group.  No width fields allowed.
-        T N   For 'tabline': start of tab page N label.  Use %T or %X to end
+        T N   For 'tabline': start of tabpage N label.  Use %T or %X to end
               the label.  Clicking this label with left mouse button switches
-              to the specified tab page, while clicking it with middle mouse
-              button closes the specified tab page.
+              to the specified tabpage, while clicking it with middle mouse
+              button closes the specified tabpage.
         X N   For 'tabline': start of close tab N label.  Use %X or %T to end
               the label, e.g.: %3Xclose%X.  Use %999X for a "close current
               tab" label.  Clicking this label with left mouse button closes
-              the specified tab page.
+              the specified tabpage.
         @ N   Start of execute function label. Use %X or %T to end the label,
               e.g.: %10@SwitchBuffer@foo.c%X.  Clicking this label runs the
               specified function: in the example when clicking once using left
@@ -8910,13 +9258,17 @@ local options = {
                  added without modifying code that reacts on mouse clicks on
                  this label.
               Use |getmousepos()|.winid in the specified function to get the
-              corresponding window id of the clicked item.
-        \< -   Where to truncate line if too long.  Default is at the start.
+              corresponding |window-ID| of the clicked item.
+        \< -   Where to truncate line if too long.  Default is at the first
+              item.  Truncation markers within item groups apply to the
+              truncation of that group until its maxwid is reached.
               No width fields allowed.
         = -   Separation point between alignment sections.  Each section will
               be separated by an equal number of spaces.  With one %= what
               comes after it will be right-aligned.  With two %= there is a
               middle part, with white space left and right of it.
+              Alignment sections within item groups will be separated until
+              minwid of the group is reached.
               No width fields allowed.
         # -   Set highlight group.  The name must follow and then a # again.
               Thus use %#HLname# for highlight group HLname.  The same
@@ -8964,6 +9316,8 @@ local options = {
         A result of all digits is regarded a number for display purposes.
         Otherwise the result is taken as flag text and applied to the rules
         described above.
+        							*stl-%0{*
+        With %0{ neither applies: the result is inserted as a literal string.
 
         Watch out for errors in expressions.  They may render Vim unusable!
         If you are stuck, hold down ':' or 'Q' to get a prompt, then quit and
@@ -9043,24 +9397,20 @@ local options = {
       cb = 'did_set_swapfile',
       defaults = true,
       desc = [=[
-        Use a swapfile for the buffer.  This option can be reset when a
-        swapfile is not wanted for a specific buffer.  For example, with
-        confidential information that even root must not be able to access.
-        Careful: All text will be in memory:
-        	- Don't use this for big files.
-        	- Recovery will be impossible!
-        A swapfile will only be present when 'updatecount' is non-zero and
-        'swapfile' is set.
-        When 'swapfile' is reset, the swap file for the current buffer is
-        immediately deleted.  When 'swapfile' is set, and 'updatecount' is
-        non-zero, a swap file is immediately created.
-        Also see |swap-file|.
-        If you want to open a new buffer without creating a swap file for it,
-        use the |:noswapfile| modifier.
-        See 'directory' for where the swap file is created.
+        Use a |swap-file| for the buffer (if 'updatecount' is non-zero). The
+        'directory' option decides where swapfiles are stored.
 
-        This option is used together with 'bufhidden' and 'buftype' to
-        specify special kinds of buffers.   See |special-buffers|.
+        To open a new buffer without creating a swapfile, use |:noswapfile|.
+        To disable for an existing buffer, reset its 'swapfile' option.
+        Careful:
+        	- Recovery will be impossible!
+        	- The entire file will be in memory.
+
+        When reset, the swapfile for the current buffer is immediately
+        deleted.  When re-enabled (and 'updatecount' is non-zero), a swapfile
+        is immediately created.
+
+        Used with 'bufhidden' and 'buftype' to specify |special-buffers|.
       ]=],
       full_name = 'swapfile',
       redraw = { 'statuslines' },
@@ -9072,8 +9422,9 @@ local options = {
     {
       abbreviation = 'swb',
       defaults = 'uselast',
-      values = { 'useopen', 'usetab', 'split', 'newtab', 'vsplit', 'uselast' },
-      flags = true,
+      schema = {
+        flags = { 'useopen', 'usetab', 'split', 'newtab', 'vsplit', 'uselast' },
+      },
       deny_duplicates = true,
       desc = [=[
         This option controls the behavior when switching between buffers.
@@ -9086,18 +9437,18 @@ local options = {
           |:sbnext|, or |:sbrewind|).
         Possible values (comma-separated list):
            useopen	If included, jump to the first open window in the
-        		current tab page that contains the specified buffer
+        		current tabpage that contains the specified buffer
         		(if there is one).  Otherwise: Do not examine other
         		windows.
-           usetab	Like "useopen", but also consider windows in other tab
-        		pages.
+           usetab	Like "useopen", but also consider windows in other
+        		tabpages.
            split	If included, split the current window before loading
         		a buffer for a |quickfix| command that display errors.
         		Otherwise: do not split, use current window (when used
         		in the quickfix window: the previously used window or
         		split if there is no other window).
            vsplit	Just like "split" but split vertically.
-           newtab	Like "split", but open a new tab page.  Overrules
+           newtab	Like "split", but open a new tabpage.  Overrules
         		"split" when both are present.
            uselast	If included, jump to the previously used window when
         		jumping to errors with |quickfix| commands.
@@ -9170,24 +9521,25 @@ local options = {
     {
       abbreviation = 'tcl',
       defaults = '',
-      values = { 'left', 'uselast' },
-      flags = true,
+      schema = {
+        flags = { 'left', 'uselast' },
+      },
       deny_duplicates = true,
       desc = [=[
-        This option controls the behavior when closing tab pages (e.g., using
-        |:tabclose|).  When empty Vim goes to the next (right) tab page.
+        This option controls the behavior when closing tabpages (e.g., using
+        |:tabclose|).  When empty Vim goes to the next (right) tabpage.
 
         Possible values (comma-separated list):
-           left		If included, go to the previous tab page instead of
+           left		If included, go to the previous tabpage instead of
         		the next one.
-           uselast	If included, go to the previously used tab page if
+           uselast	If included, go to the previously used tabpage if
         		possible.  This option takes precedence over the
         		others.
       ]=],
       full_name = 'tabclose',
       list = 'onecomma',
       scope = { 'global' },
-      short_desc = N_('which tab page to focus when closing a tab'),
+      short_desc = N_('which tabpage to focus when closing a tab'),
       type = 'string',
       varname = 'p_tcl',
       flags_varname = 'tcl_flags',
@@ -9197,14 +9549,14 @@ local options = {
       cb = 'did_set_tabline',
       defaults = '',
       desc = [=[
-        When non-empty, this option determines the content of the tab pages
+        When non-empty, this option determines the content of the tabpages
         line at the top of the Vim window.  When empty Vim will use a default
-        tab pages line.  See |setting-tabline| for more info.
+        tabpages line.  See |setting-tabline| for more info.
 
-        The tab pages line only appears as specified with the 'showtabline'
+        The tabpages line only appears as specified with the 'showtabline'
         option and only when there is no GUI tab line.  When 'e' is in
         'guioptions' and the GUI supports a tab line 'guitablabel' is used
-        instead.  Note that the two tab pages lines are very different.
+        instead.  Note that the two tabpages lines are very different.
 
         The value is evaluated like with 'statusline'.  You can use
         |tabpagenr()|, |tabpagewinnr()| and |tabpagebuflist()| to figure out
@@ -9215,14 +9567,14 @@ local options = {
         trigger it to be updated, use |:redrawtabline|.
         This option cannot be set in a modeline when 'modelineexpr' is off.
 
-        Keep in mind that only one of the tab pages is the current one, others
+        Keep in mind that only one of the tabpages is the current one, others
         are invisible and you can't jump to their windows.
       ]=],
       full_name = 'tabline',
       modelineexpr = true,
       redraw = { 'tabline' },
       scope = { 'global' },
-      short_desc = N_('custom format for the console tab pages line'),
+      short_desc = N_('custom format for the console tabpages line'),
       type = 'string',
       varname = 'p_tal',
     },
@@ -9230,12 +9582,12 @@ local options = {
       abbreviation = 'tpm',
       defaults = 50,
       desc = [=[
-        Maximum number of tab pages to be opened by the |-p| command line
+        Maximum number of tabpages to be opened by the |-p| command line
         argument or the ":tab all" command. |tabpage|
       ]=],
       full_name = 'tabpagemax',
       scope = { 'global' },
-      short_desc = N_('maximum number of tab pages for |-p| and "tab all"'),
+      short_desc = N_('maximum number of tabpages for |-p| and "tab all"'),
       type = 'number',
       varname = 'p_tpm',
     },
@@ -9321,8 +9673,9 @@ local options = {
       abbreviation = 'tc',
       cb = 'did_set_tagcase',
       defaults = 'followic',
-      values = { 'followic', 'ignore', 'match', 'followscs', 'smart' },
-      flags = true,
+      schema = {
+        flags = { 'followic', 'ignore', 'match', 'followscs', 'smart' },
+      },
       desc = [=[
         This option specifies how case is handled when searching the tags
         file:
@@ -9351,8 +9704,6 @@ local options = {
         function and an example.  The value can be the name of a function, a
         |lambda| or a |Funcref|.  See |option-value-function| for more
         information.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'tagfunc',
       func = true,
@@ -9487,8 +9838,9 @@ local options = {
     {
       abbreviation = 'tpf',
       defaults = 'BS,HT,ESC,DEL',
-      values = { 'BS', 'HT', 'FF', 'ESC', 'DEL', 'C0', 'C1' },
-      flags = true,
+      schema = {
+        flags = { 'BS', 'HT', 'FF', 'ESC', 'DEL', 'C0', 'C1' },
+      },
       deny_duplicates = true,
       desc = [=[
         A comma-separated list of options for specifying control characters
@@ -9598,9 +9950,6 @@ local options = {
         with CTRL-X CTRL-T.  |i_CTRL-X_CTRL-T| See |compl-thesaurusfunc|.
         The value can be the name of a function, a |lambda| or a |Funcref|.
         See |option-value-function| for more information.
-
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'thesaurusfunc',
       func = true,
@@ -9653,10 +10002,11 @@ local options = {
       cb = 'did_set_title_icon',
       defaults = false,
       desc = [=[
-        When on, the title of the window will be set to the value of
-        'titlestring' (if it is not empty), or to:
+        If enabled, Nvim will update the (GUI or terminal) window title. The
+        format is configured by 'titlestring'. By default it looks like: >
         	filename [+=-] (path) - Nvim
-        Where:
+        <
+        where: >
         	filename	the name of the file being edited
         	-		indicates the file cannot be modified, 'ma' off
         	+		indicates the file was modified
@@ -9664,6 +10014,7 @@ local options = {
         	=+		indicates the file is read-only and modified
         	(path)		is the path of the file being edited
         	- Nvim		the server name |v:servername| or "Nvim"
+        <
       ]=],
       full_name = 'title',
       scope = { 'global' },
@@ -9696,8 +10047,6 @@ local options = {
       desc = [=[
         If not empty, this option will be used to set the window title when
         exiting.  Only if 'title' is enabled.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       full_name = 'titleold',
       no_mkrc = true,
@@ -9711,31 +10060,31 @@ local options = {
       cb = 'did_set_titlestring',
       defaults = '',
       desc = [=[
-        When this option is not empty, it will be used for the title of the
-        window.  This happens only when the 'title' option is on.
+        Formats the window title, enabled by the 'title' option.
 
-        When this option contains printf-style '%' items, they will be
-        expanded according to the rules used for 'statusline'.  If it contains
-        an invalid '%' format, the value is used as-is and no error or warning
-        will be given when the value is set.
+        Contains printf-style "%" items, expanded according to the rules of
+        'statusline'.  If a "%" format is invalid, it is used as-is and no
+        error will be given.
 
-        The default behaviour is equivalent to: >vim
-            set titlestring=%t%(\ %M%)%(\ \(%{expand(\"%:~:h\")}\)%)%a\ -\ Nvim
+        The default (empty) behaviour is equivalent to: >vim
+            set titlestring=%t%(\ %M%)%(\ \(%{expand('%:p:~:h')}\)%)%a\ -\ Nvim
         <
-        This option cannot be set in a modeline when 'modelineexpr' is off.
-
         Example: >vim
             auto BufEnter * let &titlestring = hostname() .. "/" .. expand("%:p")
             set title titlestring=%<%F%=%l/%L-%P titlelen=70
-        <	The value of 'titlelen' is used to align items in the middle or right
-        of the available space.
-        Some people prefer to have the file name first: >vim
+        <	The value of 'titlelen' is used to align items in the middle
+        or right of the available space.
+
+        Example: to have the file name first: >vim
             set titlestring=%t%(\ %M%)%(\ (%{expand(\"%:~:.:h\")})%)%(\ %a%)
-        <	Note the use of "%{ }" and an expression to get the path of the file,
-        without the file name.  The "%( %)" constructs are used to add a
+        <	Note the use of "%{ }" and an expression to get the path of
+        the file, without the file name.  The "%( %)" constructs add a
         separating space only when needed.
+
         NOTE: Use of special characters in 'titlestring' may cause the display
         to be garbled (e.g., when it contains a CR or NL character).
+
+        This option cannot be set in a modeline when 'modelineexpr' is off.
       ]=],
       full_name = 'titlestring',
       modelineexpr = true,
@@ -9784,12 +10133,29 @@ local options = {
     {
       abbreviation = 'tf',
       defaults = true,
+      desc = [=[
+        Enables Nvim |TUI| features which assume a fast (usually local) host
+        terminal. During startup, Nvim queries the terminal (for 'background'
+        detection, etc.) and must wait for a response (or timeout).
+
+        If your terminal environment is slow (e.g. remote SSH), or broken
+        (doesn't respond to queries), Nvim startup may be slower. Therefore
+        you can disable this option by setting the `$NVIM_NOTTYFAST`
+        environment variable before starting Nvim: >
+        	NVIM_NOTTYFAST=1 nvim
+        <
+
+        The queries are performed early, before |--cmd| and user |config|, so
+        `:set nottyfast` in your config happens too late.
+      ]=],
       full_name = 'ttyfast',
       no_mkrc = true,
       scope = { 'global' },
-      short_desc = N_('Deprecated'),
+      short_desc = N_('assume terminal responds quickly, enabling more features'),
+      -- Vim E1568: https://github.com/vim/vim/blob/0f9218851dc91a855c3d186ccd05f550907cf37e/src/errors.h#L3791
+      tags = { 'E1568', '$NVIM_NOTTYFAST' },
       type = 'boolean',
-      immutable = true,
+      varname = 'p_tf',
     },
     {
       abbreviation = 'udir',
@@ -9811,8 +10177,6 @@ local options = {
         given, no further entry is used.
         See |undo-persistence|.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
 
         Note that unlike 'directory' and 'backupdir', 'undodir' always acts as
         though the trailing slashes are present (see 'backupdir' for what this
@@ -9904,17 +10268,15 @@ local options = {
       cb = 'did_set_updatecount',
       defaults = 200,
       desc = [=[
-        After typing this many characters the swap file will be written to
-        disk.  When zero, no swap file will be created at all (see chapter on
-        recovery |crash-recovery|).  'updatecount' is set to zero by starting
-        Vim with the "-n" option, see |startup|.  When editing in readonly
-        mode this option will be initialized to 10000.
-        The swapfile can be disabled per buffer with 'swapfile'.
-        When 'updatecount' is set from zero to non-zero, swap files are
-        created for all buffers that have 'swapfile' set.  When 'updatecount'
-        is set to zero, existing swap files are not deleted.
-        This option has no meaning in buffers where 'buftype' is "nofile" or
-        "nowrite".
+        The |swap-file| will be written after typing this many characters.
+
+        - Ignored in buffers where 'buftype' is "nofile" or "nowrite".
+        - Initialized to 10000 when editing in readonly |-R| mode.
+        - To disable swapfiles per-buffer, unset the 'swapfile' option.
+        - To disable swapfiles globally, set this option to zero (or start
+          with |-n|). See |crash-recovery|. Existing swapfiles are not deleted.
+        - When re-enabled (from zero to non-zero), swapfiles are created for
+          all buffers that have 'swapfile' set.
       ]=],
       full_name = 'updatecount',
       scope = { 'global' },
@@ -10042,8 +10404,6 @@ local options = {
         The difference with |:redir| is that verbose messages are not
         displayed when 'verbosefile' is set.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = true,
       full_name = 'verbosefile',
@@ -10059,8 +10419,6 @@ local options = {
       desc = [=[
         Name of the directory where to store files for |:mkview|.
         Environment variables are expanded |:set_env|.
-        This option cannot be set from a |modeline| or in the |sandbox|, for
-        security reasons.
       ]=],
       expand = 'nodefault',
       full_name = 'viewdir',
@@ -10074,7 +10432,6 @@ local options = {
       abbreviation = 'vop',
       cb = 'did_set_str_generic',
       defaults = 'folds,cursor,curdir',
-      flags = true,
       deny_duplicates = true,
       desc = [=[
         Changes the effect of the |:mkview| command.  It is a comma-separated
@@ -10103,14 +10460,15 @@ local options = {
       abbreviation = 've',
       cb = 'did_set_virtualedit',
       defaults = '',
-      values = { 'block', 'insert', 'all', 'onemore', 'none', 'NONE' },
-      flags = {
-        Block = 5,
-        Insert = 6,
-        All = 4,
-        Onemore = 8,
-        None = 16,
-        NoneU = 32,
+      schema = {
+        flags = {
+          { 'block', 0x05 },
+          { 'insert', 0x06 },
+          { 'all', 0x04 },
+          { 'onemore', 0x08 },
+          { 'none', 0x10 },
+          { 'NONE', 0x20, 'NoneU' }, -- alternative spelling of "none" (C token override)
+        },
       },
       deny_duplicates = true,
       desc = [=[
@@ -10361,8 +10719,9 @@ local options = {
       cb = 'did_set_wildmode',
       defaults = 'full',
       -- Keep this in sync with check_opt_wim().
-      values = { 'full', 'longest', 'list', 'lastused', 'noselect' },
-      flags = true,
+      schema = {
+        flags = { 'full', 'longest', 'list', 'lastused', 'noselect', 'noinsert' },
+      },
       deny_duplicates = false,
       desc = [=[
         Completion mode used for the character specified with 'wildchar'.
@@ -10387,8 +10746,12 @@ local options = {
         		applies to buffer name completion.
         "noselect"	If 'wildmenu' is enabled, show the menu but do not
         		preselect the first item.
-        If only one match exists, it is completed fully, unless "noselect" is
-        specified.
+        "noinsert"	If 'wildmenu' is enabled, show the menu and preselect
+        		the first match, but do not insert it in the command
+        		line.  If both "noinsert" and "noselect" are present,
+        		"noselect" takes precedence.
+        If only one match exists, it is completed fully, unless "noselect" or
+        "noinsert" is specified.
 
         Some useful combinations of colon-separated values:
         "longest:full"		Start with the longest common string and show
@@ -10436,8 +10799,9 @@ local options = {
     {
       abbreviation = 'wop',
       defaults = 'pum,tagfile',
-      values = { 'fuzzy', 'tagfile', 'pum', 'exacttext' },
-      flags = true,
+      schema = {
+        flags = { 'fuzzy', 'tagfile', 'pum', 'exacttext' },
+      },
       deny_duplicates = true,
       desc = [=[
         A list of words that change how |cmdline-completion| is done.
@@ -10465,7 +10829,10 @@ local options = {
         		is not supported for file and directory names and
         		instead wildcard expansion is used.
           pum		Display the completion matches using the popup menu in
-        		the same style as the |ins-completion-menu|.
+        		the same style as the |ins-completion-menu|.  When an
+        		info popup is shown next to the menu, it can be
+        		scrolled by moving the mouse pointer on top of it and
+        		using the scroll wheel.
           tagfile	When using CTRL-D to list matching tags, the kind of
         		tag and the file of the tag is listed.	Only one match
         		is displayed per line.  Often used tag kinds are:
@@ -10486,7 +10853,9 @@ local options = {
     {
       abbreviation = 'wak',
       defaults = 'menu',
-      values = { 'yes', 'menu', 'no' },
+      schema = {
+        enum = { 'yes', 'menu', 'no' },
+      },
       desc = [=[
         		only used in Win32
         Some GUI versions allow the access to menu entries by using the ALT
@@ -10559,7 +10928,9 @@ local options = {
       scope = { 'global' },
       cb = 'did_set_winborder',
       defaults = { if_true = '' },
-      values = { '', 'double', 'single', 'shadow', 'rounded', 'solid', 'bold', 'none' },
+      schema = {
+        set = { '', 'double', 'single', 'shadow', 'rounded', 'solid', 'bold', 'none' },
+      },
       desc = [=[
         Defines the default border style of floating windows. The default value
         is empty, which is equivalent to "none". Valid values include:
@@ -10570,9 +10941,12 @@ local options = {
         - "shadow": Drop shadow effect, by blending with the background.
         - "single": Single-line box.
         - "solid": Adds padding by a single whitespace cell.
-        - custom: comma-separated list of exactly 8 characters in clockwise
-          order starting from topleft. Example: >lua
-             vim.o.winborder='+,-,+,|,+,-,+,|'
+        - custom: comma-separated list of exactly 8 entries in clockwise
+          order starting from topleft. Each entry may be a single char, a
+          single space (filled with the background), or empty (no border on
+          that side). Example: >lua
+             vim.o.winborder = '+,-,+,|,+,-,+,|'
+             vim.o.winborder = ',,, ,,,, '  -- left/right padding only
         <
       ]=],
       short_desc = N_('border of floating window'),
@@ -10753,6 +11127,19 @@ local options = {
       varname = 'p_wmw',
     },
     {
+      abbreviation = 'wp',
+      defaults = false,
+      desc = [=[
+        If enabled, the window is pinned and will not be closed by |:only|
+        and |:fclose|. Only commands specifically targeting the window can
+        close it.
+      ]=],
+      full_name = 'winpinned',
+      scope = { 'win' },
+      short_desc = N_('prevent closing window with :only and :fclose'),
+      type = 'boolean',
+    },
+    {
       abbreviation = 'wiw',
       cb = 'did_set_winwidth',
       defaults = 20,
@@ -10903,9 +11290,32 @@ local options = {
   },
 }
 
+--- Ordered completion values of a schema: `flags` and `enum` tokens as-is, `dict` keys as "key:"
+--- (or bare for a flag key). Empty for `chars` (e.g. 'listchars') and `flagchars` (e.g.
+--- 'formatoptions'), which self-expand. Shared with gen_options.lua.
+--- @param schema vim.option_schema
+--- @return string[]
+local function schema_values(schema)
+  local values = {} --- @type string[]
+  for _, f in ipairs(schema.flags or {}) do
+    values[#values + 1] = type(f) == 'string' and f or f[1]
+  end
+  for _, e in ipairs(schema.enum or schema.set or {}) do
+    values[#values + 1] = e
+  end
+  for _, k in ipairs(schema.dict or {}) do
+    values[#values + 1] = type(k) == 'string' and k or (k[1] .. ':') -- bare flag / typed "key:"
+  end
+  -- flagchars and chars self-expand: no completion values.
+  return values
+end
+options.schema_values = schema_values
+
 --- @param o vim.option_meta
 local function preprocess(o)
-  if o.values then
+  -- Options with a fixed set of string values get generic completion, and a generic did_set
+  -- (opt_strings_flags) unless they define their own cb. char/chars and char flags expand themselves.
+  if o.schema and #schema_values(o.schema) > 0 then
     o.cb = o.cb or 'did_set_str_generic'
     o.expand_cb = o.expand_cb or 'expand_set_str_generic'
   end

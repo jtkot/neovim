@@ -39,11 +39,18 @@ local function compute_hash(fullpath, bufnr)
   end
 
   if bufnr then
-    local newline = vim.bo[bufnr].fileformat == 'unix' and '\n' or '\r\n'
-    contents =
-      table.concat(vim.api.nvim_buf_get_lines(bufnr --[[@as integer]], 0, -1, false), newline)
-    if vim.bo[bufnr].endofline then
-      contents = contents .. newline
+    local is_unchanged_empty = vim.api.nvim_buf_call(bufnr, function()
+      return not vim.bo[bufnr].modified and vim.fn.line2byte(1) == -1
+    end)
+    if is_unchanged_empty then
+      contents = ''
+    else
+      local newline = vim.bo[bufnr].fileformat == 'unix' and '\n' or '\r\n'
+      contents =
+        table.concat(vim.api.nvim_buf_get_lines(bufnr --[[@as integer]], 0, -1, false), newline)
+      if vim.bo[bufnr].endofline then
+        contents = contents .. newline
+      end
     end
   else
     do
@@ -103,6 +110,7 @@ function M.read(path)
   if not fullpath then
     return nil
   end
+  fullpath = vim.fs.normalize(fullpath) -- Ensure "/" slashes, even on Windows.
 
   local trust = read_trust()
 
@@ -143,7 +151,7 @@ function M.read(path)
     return nil
   elseif result == 2 then
     -- View
-    vim.cmd('sview ' .. fullpath)
+    vim.cmd(('sview %s'):format(vim.fn.fnameescape(fullpath)))
     return nil
   elseif result == 3 then
     -- Deny
@@ -162,9 +170,10 @@ end
 --- @class vim.trust.opts
 --- @inlinedoc
 ---
---- - `'allow'` to add a file to the trust database and trust it,
---- - `'deny'` to add a file to the trust database and deny it,
---- - `'remove'` to remove file from the trust database
+--- One of:
+---   - `'allow'` to add a file to the trust database and trust it,
+---   - `'deny'` to add a file to the trust database and deny it,
+---   - `'remove'` to remove file from the trust database
 --- @field action 'allow'|'deny'|'remove'
 ---
 --- Path to a file to update. Mutually exclusive with {bufnr}.
@@ -210,6 +219,7 @@ function M.trust(opts)
   if not fullpath then
     return false, string.format('invalid path: %s', path)
   end
+  fullpath = vim.fs.normalize(fullpath) -- Ensure "/" slashes, even on Windows.
 
   local trust = read_trust()
 

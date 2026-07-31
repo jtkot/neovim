@@ -9,6 +9,12 @@ local validate = vim.validate
 ---@type table<integer,vim.lsp.Client>
 local all_clients = {}
 
+---@param provider string
+---@param capability string[]?
+local function is_nested_server_capability_provider(provider, capability)
+  return capability ~= nil and #capability > 1 and provider == table.concat(capability, '.')
+end
+
 --- @alias vim.lsp.client.on_init_cb fun(client: vim.lsp.Client, init_result: lsp.InitializeResult)
 --- @alias vim.lsp.client.on_attach_cb fun(client: vim.lsp.Client, bufnr: integer)
 --- @alias vim.lsp.client.on_exit_cb fun(code: integer, signal: integer, client_id: integer)
@@ -30,6 +36,16 @@ local all_clients = {}
 --- Callback which can modify parameters before they are sent to the server. Invoked before LSP
 --- "initialize" phase (after `cmd` is invoked), where `params` is the parameters being sent to the
 --- server and `config` is the config passed to |vim.lsp.start()|.
+---
+--- Hint: use |vim.tbl_deep_extend()| to set nested fields easily.
+--- ```lua
+--- before_init = function(_, config)
+---   config.settings = vim.tbl_deep_extend('force',
+---     config.settings,
+---     { tailwindCSS = { experimental = { configFile = find_tailwind_global_css() } } }
+---   )
+--- end
+--- ```
 --- @field before_init? fun(params: lsp.InitializeParams, config: vim.lsp.ClientConfig)
 ---
 --- Map overriding the default capabilities defined by |vim.lsp.protocol.make_client_capabilities()|,
@@ -41,21 +57,34 @@ local all_clients = {}
 ---
 --- Command `string[]` that launches the language server (treated as in |jobstart()|, must be
 --- absolute or on `$PATH`, shell constructs like "~" are not expanded), or function that creates an
---- RPC client. Function receives a `dispatchers` table and the resolved `config`, and must return
---- a table with member functions `request`, `notify`, `is_closing` and `terminate`.
---- See |vim.lsp.rpc.request()|, |vim.lsp.rpc.notify()|.
---- For TCP there is a builtin RPC client factory: |vim.lsp.rpc.connect()|
---- @field cmd string[]|fun(dispatchers: vim.lsp.rpc.Dispatchers, config: vim.lsp.ClientConfig): vim.lsp.rpc.PublicClient
+--- RPC client (or an in-process |lsp-server|). Function receives a `dispatchers` table and the
+--- resolved `config`, and must return an object in the form of |vim.lsp.rpc.Client|.
 ---
---- Directory to launch the `cmd` process. Not related to `root_dir`.
---- (default: cwd)
+--- Example (list):
+--- ```lua
+--- cmd = { 'flow', 'lsp' }
+--- ```
+--- Example (function):
+--- ```lua
+--- cmd = function(dispatchers, config)
+---   local cmd = vim.fn.executable('flow') == 1 and { 'flow', 'lsp' } or { 'npx', '--no-install', 'flow', 'lsp' }
+---   return vim.lsp.rpc.start(cmd, dispatchers)
+--- end
+--- ```
+---
+--- - See |vim.lsp.rpc.Client|.
+--- - For TCP there is a builtin RPC client factory: |vim.lsp.rpc.connect()|
+--- @field cmd string[]|fun(dispatchers: vim.lsp.rpc.Dispatchers, config: vim.lsp.ClientConfig): vim.lsp.rpc.Client
+---
+--- Directory where the `cmd` process is launched when `cmd` is a string array. Defaults to
+--- `root_dir` when available, then the current working directory.
 --- @field cmd_cwd? string
 ---
 --- Environment variables passed to the LSP process on spawn. Non-string values are coerced to
 --- string.
 --- Example:
 --- ```lua
---- { PORT = 8080; HOST = '0.0.0.0'; }
+--- { PORT = 8080, HOST = '0.0.0.0' }
 --- ```
 --- @field cmd_env? table
 ---
@@ -68,9 +97,11 @@ local all_clients = {}
 --- (default: `true`)
 --- @field detached? boolean
 ---
---- Milliseconds to wait for server to exit cleanly after sending the "shutdown" request before
---- sending kill -15. If set to false, waits indefinitely. If set to true, nvim will kill the
---- server immediately.
+--- Decides if/when to force-stop the server after sending the "shutdown" request. See |Client:stop()|.
+--- Note: when Nvim itself is exiting,
+--- - `false`: Nvim will not force-stop LSP server(s).
+--- - `true`: Nvim will force-stop LSP server(s) that did not comply with the "shutdown" request.
+--- - `number`: Nvim will wait up to `exit_timeout` milliseconds before performing force-stop.
 --- (default: `false`)
 --- @field exit_timeout? integer|boolean
 ---
@@ -142,7 +173,8 @@ local all_clients = {}
 
 --- @class vim.lsp.Client
 ---
---- @field attached_buffers table<integer,true>
+--- Each buffer's last used `languageId`.
+--- @field attached_buffers table<integer,string>
 ---
 --- Capabilities provided by the client (editor or tool), at startup.
 --- @field capabilities lsp.ClientCapabilities
@@ -156,9 +188,7 @@ local all_clients = {}
 --- Capabilities provided at runtime (after startup).
 --- @field dynamic_capabilities lsp.DynamicCapabilities
 ---
---- Milliseconds to wait for server to exit cleanly after sending the "shutdown" request before
---- sending kill -15. If set to false, waits indefinitely. If set to true, nvim will kill the
---- server immediately.
+--- See [vim.lsp.ClientConfig].
 --- (default: `false`)
 --- @field exit_timeout integer|boolean
 ---
@@ -199,7 +229,7 @@ local all_clients = {}
 ---
 --- RPC client object, for low level interaction with the client.
 --- See |vim.lsp.rpc.start()|.
---- @field rpc vim.lsp.rpc.PublicClient
+--- @field rpc vim.lsp.rpc.Client
 ---
 --- Response from the server sent on `initialize` describing the server's capabilities.
 --- @field server_capabilities lsp.ServerCapabilities?
@@ -475,7 +505,7 @@ function Client.create(config)
     self.rpc = config_cmd(dispatchers, config)
   else
     self.rpc = lsp.rpc.start(config_cmd, dispatchers, {
-      cwd = config.cmd_cwd,
+      cwd = config.cmd_cwd or config.root_dir,
       env = config.cmd_env,
       detached = config.detached,
     })
@@ -524,9 +554,13 @@ function Client:initialize()
   end
 
   -- HACK: Capability modules must be loaded
-  require('vim.lsp.semantic_tokens')
   require('vim.lsp._folding_range')
+  require('vim.lsp.diagnostic')
+  require('vim.lsp.document_color')
+  require('vim.lsp.inlay_hint')
   require('vim.lsp.inline_completion')
+  require('vim.lsp.linked_editing_range')
+  require('vim.lsp.semantic_tokens')
 
   local init_params = {
     -- The process Id of the parent process that started the server. Is null if
@@ -567,7 +601,9 @@ function Client:initialize()
   local rpc = self.rpc
 
   rpc.request('initialize', init_params, function(init_err, result)
-    assert(not init_err, tostring(init_err))
+    if init_err then
+      error(lsp.rpc.format_rpc_error(init_err))
+    end
     assert(result, 'server sent empty result')
     rpc.notify('initialized', vim.empty_dict())
     self.initialized = true
@@ -617,11 +653,11 @@ function Client:_process_static_registrations()
 
   for method in pairs(lsp.protocol._method_supports_static_registration) do
     local capability = lsp.protocol._request_name_to_server_capability[method]
-    if
-      vim.tbl_get(self.server_capabilities, capability[1], 'id')
-      and self:_supports_registration(method)
-    then
-      local cap = vim.tbl_get(self.server_capabilities, capability[1])
+    local provider = self:_registration_provider(method)
+    local cap = is_nested_server_capability_provider(provider, capability)
+        and vim.tbl_get(self.server_capabilities, unpack(capability))
+      or vim.tbl_get(self.server_capabilities, capability[1])
+    if type(cap) == 'table' and cap.id then
       static_registrations[#static_registrations + 1] = {
         id = cap.id,
         method = method,
@@ -690,7 +726,7 @@ function Client:_process_request(id, req_type, bufnr, method)
   self.requests[id] = req_type ~= 'complete' and request or nil
 
   api.nvim_exec_autocmds('LspRequest', {
-    buffer = api.nvim_buf_is_valid(bufnr) and bufnr or nil,
+    buf = api.nvim_buf_is_valid(bufnr) and bufnr or nil,
     modeline = false,
     data = { client_id = self.id, request_id = id, request = request },
   })
@@ -713,10 +749,8 @@ end
 --- @see |vim.lsp.buf_request_all()|
 function Client:request(method, params, handler, bufnr)
   if not handler then
-    handler = assert(
-      self:_resolve_handler(method),
-      string.format('not found: %q request handler for client %q.', method, self.name)
-    )
+    handler = self:_resolve_handler(method)
+      or error(('not found: %q request handler for client %q.'):format(method, self.name))
   end
   -- Ensure pending didChange notifications are sent so that the server doesn't operate on a stale state
   changetracking.flush(self, bufnr)
@@ -815,9 +849,10 @@ end
 ---
 --- @param method vim.lsp.protocol.Method.ClientToServer.Notification LSP method name.
 --- @param params table? LSP request params.
+--- @param bufnr integer? Buffer associated with notification.
 --- @return boolean status indicating if the notification was successful.
 ---                        If it is false, then the client has shutdown.
-function Client:notify(method, params)
+function Client:notify(method, params, bufnr)
   if method ~= 'textDocument/didChange' then
     changetracking.flush(self)
   end
@@ -826,14 +861,17 @@ function Client:notify(method, params)
 
   if client_active then
     vim.schedule(function()
-      api.nvim_exec_autocmds('LspNotify', {
-        modeline = false,
-        data = {
-          client_id = self.id,
-          method = method,
-          params = params,
-        },
-      })
+      if not self:is_stopped() and (not bufnr or self.attached_buffers[bufnr]) then
+        api.nvim_exec_autocmds('LspNotify', {
+          buf = bufnr,
+          modeline = false,
+          data = {
+            client_id = self.id,
+            method = method,
+            params = params,
+          },
+        })
+      end
     end)
   end
 
@@ -852,20 +890,19 @@ end
 
 --- Stops a client, optionally with force after a timeout.
 ---
---- By default, it will request the server to shutdown, then force a shutdown
---- if the server has not exited after `self.exit_timeout` milliseconds. If
---- you request to stop a client which has previously been requested to
---- shutdown, it will automatically escalate and force shutdown immediately,
---- regardless of the value of `force` (or `self.exit_timeout` if `nil`).
+--- By default this sends a "shutdown" request to the server, escalating to force-stop if the server
+--- has not exited after `self.exit_timeout` milliseconds (unless `exit_timeout=false`).
+--- Calling stop() on a client that was previously requested to shutdown, will escalate to
+--- force-stop immediately, regardless of `force` (or `self.exit_timeout` if `force=nil`).
 ---
---- Note: Forcing shutdown while a server is busy writing out project or index
---- files can lead to file corruption.
+--- Note: Forcing shutdown while a server is busy writing out project or index files can lead to
+--- file corruption.
 ---
---- @param force? integer|boolean Time in milliseconds to wait before forcing
----                               a shutdown. If false, only request the
----                               server to shutdown, but don't force it. If
----                               true, force a shutdown immediately.
----                               (default: `self.exit_timeout`)
+--- @param force? integer|boolean (default: `self.exit_timeout`) Decides whether to force-stop the server.
+--- - `false`: Do not force-stop after "shutdown" request.
+--- - `nil`: Defaults to `exit_timeout` from |vim.lsp.ClientConfig|.
+--- - `true`: Force-stop after "shutdown" request.
+--- - number: Wait up to `force` milliseconds before force-stop.
 function Client:stop(force)
   validate('force', force, { 'number', 'boolean' }, true)
 
@@ -939,6 +976,10 @@ function Client:_supports_registration(method)
   end
   local provider = self:_registration_provider(method)
   local capability_path = lsp.protocol._provider_to_client_registration[provider]
+  if not capability_path then
+    -- If we don't know about the method, assume the client supports dynamic registration for it.
+    return true
+  end
   local capability = vim.tbl_get(self.capabilities, unpack(capability_path))
   return type(capability) == 'table' and capability.dynamicRegistration
 end
@@ -946,8 +987,7 @@ end
 --- Get provider for a method to be registered dynamically.
 --- @param method vim.lsp.protocol.Method | vim.lsp.protocol.Method.Registration
 function Client:_registration_provider(method)
-  local capability_path = lsp.protocol._request_name_to_server_capability[method]
-  return capability_path and capability_path[1]
+  return lsp.protocol._request_name_to_registration_provider[method] or method
 end
 
 --- @private
@@ -1063,17 +1103,17 @@ end
 --- Execute a lsp command, either via client command function (if available)
 --- or via workspace/executeCommand (if supported by the server)
 ---
---- @param command lsp.Command
+--- @param cmd lsp.Command
 --- @param context? {bufnr?: integer}
 --- @param handler? lsp.Handler only called if a server command
-function Client:exec_cmd(command, context, handler)
+function Client:exec_cmd(cmd, context, handler)
   context = vim.deepcopy(context or {}, true) --[[@as lsp.HandlerContext]]
   context.bufnr = vim._resolve_bufnr(context.bufnr)
   context.client_id = self.id
-  local cmdname = command.command
+  local cmdname = cmd.command
   local fn = self.commands[cmdname] or lsp.commands[cmdname]
   if fn then
-    fn(command, context)
+    fn(cmd, context)
     return
   end
 
@@ -1091,14 +1131,26 @@ function Client:exec_cmd(command, context, handler)
     )
     return
   end
-  -- Not using command directly to exclude extra properties,
+  -- Not using cmd directly to exclude extra properties,
   -- see https://github.com/python-lsp/python-lsp-server/issues/146
   --- @type lsp.ExecuteCommandParams
   local params = {
     command = cmdname,
-    arguments = command.arguments,
+    arguments = cmd.arguments,
   }
   self:request('workspace/executeCommand', params, handler, context.bufnr)
+end
+
+--- Default handler for the 'textDocument/didClose' LSP notification.
+---
+--- @param bufnr integer Number of the buffer, or 0 for current
+function Client:_text_document_did_close_handler(bufnr)
+  if not self:supports_method('textDocument/didClose') then
+    return
+  end
+  local uri = vim.uri_from_bufnr(bufnr)
+  local params = { textDocument = { uri = uri } }
+  self:notify('textDocument/didClose', params, bufnr)
 end
 
 --- Default handler for the 'textDocument/didOpen' LSP notification.
@@ -1120,7 +1172,7 @@ function Client:_text_document_did_open_handler(bufnr)
       languageId = self:_get_language_id(bufnr),
       text = lsp._buf_get_full_text(bufnr),
     },
-  })
+  }, bufnr)
 
   -- Next chance we get, we should re-do the diagnostics
   vim.schedule(function()
@@ -1137,24 +1189,20 @@ end
 --- Useful for buffer-local setup.
 --- @param bufnr integer Buffer number
 function Client:on_attach(bufnr)
+  lsp._set_defaults(self, bufnr)
+
   self:_text_document_did_open_handler(bufnr)
 
-  lsp._set_defaults(self, bufnr)
-  -- `enable(true)` cannot be called from `_set_defaults` for features with dynamic registration,
-  -- because it overrides the state every time `client/registerCapability` is received.
-  -- To allow disabling it once in `LspAttach`, we enable it once here instead.
-  lsp.document_color.enable(true, bufnr)
-
   api.nvim_exec_autocmds('LspAttach', {
-    buffer = bufnr,
+    buf = bufnr,
     modeline = false,
     data = { client_id = self.id },
   })
 
   self:_run_callbacks(self._on_attach_cbs, lsp.client_errors.ON_ATTACH_ERROR, self, bufnr)
-  -- schedule the initialization of capabilities to give the above
-  -- on_attach and LspAttach callbacks the ability to schedule wrap the
-  -- opt-out (such as deleting the semanticTokensProvider from capabilities)
+
+  -- schedule the initialization of capabilities to give the above on_attach and LspAttach callbacks
+  -- the ability to enable or disable them
   vim.schedule(function()
     if not vim.api.nvim_buf_is_valid(bufnr) then
       return
@@ -1173,7 +1221,7 @@ function Client:on_attach(bufnr)
     end
   end)
 
-  self.attached_buffers[bufnr] = true
+  self.attached_buffers[bufnr] = self:_get_language_id(bufnr)
 end
 
 --- @private
@@ -1200,18 +1248,35 @@ function Client:supports_method(method, bufnr)
     bufnr = bufnr.bufnr
   end
   local required_capability = lsp.protocol._request_name_to_server_capability[method]
-  if required_capability and vim.tbl_get(self.server_capabilities, unpack(required_capability)) then
+  local has_subcap = required_capability and #required_capability > 1
+  local is_self_mapping = required_capability
+    and #required_capability == 1
+    and required_capability[1] == method
+
+  if
+    not is_self_mapping
+    and required_capability
+    and vim.tbl_get(self.server_capabilities, unpack(required_capability))
+  then
     return true
   end
 
   local provider = self:_registration_provider(method)
+  local has_subprovider = is_nested_server_capability_provider(provider, required_capability)
   local regs = self:_get_registrations(provider, bufnr)
   if lsp.protocol._method_supports_dynamic_registration[method] and not regs then
     return false
   end
   if regs then
     for _, reg in ipairs(regs or {}) do
-      if required_capability and #required_capability > 1 then
+      if has_subprovider then
+        if
+          vim.tbl_get(reg, 'registerOptions')
+          or lsp.protocol._methods_with_no_registration_options[method]
+        then
+          return self:_supports_registration(reg.method)
+        end
+      elseif has_subcap then
         if vim.tbl_get(reg, 'registerOptions', unpack(required_capability, 2)) then
           return self:_supports_registration(reg.method)
         end
@@ -1225,43 +1290,70 @@ function Client:supports_method(method, bufnr)
     return false
   end
 
-  -- if we don't know about the method, assume that the client supports it.
-  -- This needs to be at the end, so that dynamic_capabilities are checked first
-  return required_capability == nil
+  if required_capability == nil and next(self.registrations[method] or {}) ~= nil then
+    return false
+  end
+
+  -- If we don't know about the method, or if it is a self-mapping(method=required_capability)
+  -- assume that the client supports it.
+  -- This needs to be at the end, so that dynamic_capabilities are checked first.
+  return required_capability == nil or is_self_mapping
 end
 
---- Retrieves all capability values for a given LSP method, handling both static and dynamic registrations.
---- This function abstracts over differences between capabilities declared in `server_capabilities`
---- and those registered dynamically at runtime, returning all matching capability values.
---- It also handles cases where the registration method differs from the calling method by abstracting to the Provider.
---- For example, `workspace/diagnostic` uses capabilities registered under `textDocument/diagnostic`.
---- This is useful for features like diagnostics and formatting, where servers may register multiple providers
---- with different options (such as specific filetypes or document selectors).
---- @param method vim.lsp.protocol.Method.ClientToServer | vim.lsp.protocol.Method.Registration LSP method name
---- @param ... any Additional keys to index into the capability
---- @return lsp.LSPAny[] # The capability value if it exists, empty table if not found
-function Client:_provider_value_get(method, ...)
-  local matched_regs = {} --- @type any[]
+--- Executes callback fn for all registrations for a given LSP method.
+---
+--- This handles both static capabilities (declared in server_capabilities during
+--- initialization) and dynamic registrations (registered at runtime via
+--- `client/registerCapability`).
+---
+--- Some methods may have multiple registrations (e.g., different documentSelectors
+--- or configurations). The callback is invoked once for each registration.
+---
+--- Example: Getting diagnostic identifiers from all registrations
+---     client:_provider_foreach('textDocument/diagnostic', function(cap)
+---       print(cap.identifier)  -- "static-id", "dynamic-id-1", "dynamic-id-2"
+---     end)
+---
+--- Note: Some capabilities alias to different providers. For example,
+--- `workspace/diagnostic` uses the same `diagnosticProvider` as `textDocument/diagnostic`.
+---
+---@param method vim.lsp.protocol.Method.ClientToServer | vim.lsp.protocol.Method.Registration LSP method name
+---@param fn fun(capability_value: lsp.LSPAny) Callback invoked for each matching capability
+function Client:_provider_foreach(method, fn)
   local provider = self:_registration_provider(method)
+  local required_capability = lsp.protocol._request_name_to_server_capability[method]
   local dynamic_regs = self:_get_registrations(provider)
-  if not provider then
-    return matched_regs
-  elseif not dynamic_regs then
+  local has_subcap = required_capability and #required_capability > 1
+  local has_subprovider = is_nested_server_capability_provider(provider, required_capability)
+  if not dynamic_regs then
     -- First check static capabilities
-    local static_reg = vim.tbl_get(self.server_capabilities, provider)
+    local static_reg = has_subprovider
+        and vim.tbl_get(self.server_capabilities, unpack(required_capability))
+      or vim.tbl_get(self.server_capabilities, provider)
     if static_reg then
-      matched_regs[1] = vim.tbl_get(static_reg, ...) or vim.NIL
+      if
+        has_subprovider
+        or not has_subcap
+        or vim.tbl_get(static_reg, unpack(required_capability, 2))
+      then
+        fn(static_reg)
+      end
     end
   else
-    local required_capability = lsp.protocol._request_name_to_server_capability[method]
     for _, reg in ipairs(dynamic_regs) do
-      if vim.tbl_get(reg, 'registerOptions', unpack(required_capability, 2)) then
-        matched_regs[#matched_regs + 1] = vim.tbl_get(reg, 'registerOptions', ...) or vim.NIL
+      local regoptions = vim.tbl_get(reg, 'registerOptions')
+      if
+        (
+          has_subprovider
+          and (regoptions or lsp.protocol._methods_with_no_registration_options[method])
+        )
+        or not has_subcap
+        or vim.tbl_get(regoptions, unpack(required_capability, 2))
+      then
+        fn(regoptions or {})
       end
     end
   end
-
-  return matched_regs
 end
 
 --- @private
@@ -1320,7 +1412,7 @@ end
 function Client:_on_detach(bufnr)
   if self.attached_buffers[bufnr] and api.nvim_buf_is_valid(bufnr) then
     api.nvim_exec_autocmds('LspDetach', {
-      buffer = bufnr,
+      buf = bufnr,
       modeline = false,
       data = { client_id = self.id },
     })
@@ -1344,18 +1436,13 @@ function Client:_on_detach(bufnr)
     end
   end
 
+  vim.diagnostic.reset(vim.lsp.diagnostic.get_namespace(self.id, false), bufnr)
+
   changetracking.reset_buf(self, bufnr)
 
-  if self:supports_method('textDocument/didClose') then
-    local uri = vim.uri_from_bufnr(bufnr)
-    local params = { textDocument = { uri = uri } }
-    self:notify('textDocument/didClose', params)
-  end
+  self:_text_document_did_close_handler(bufnr)
 
   self.attached_buffers[bufnr] = nil
-
-  local namespace = lsp.diagnostic.get_namespace(self.id)
-  vim.diagnostic.reset(namespace, bufnr)
 end
 
 --- Reset defaults set by `set_defaults`.
@@ -1373,7 +1460,7 @@ local function reset_defaults(bufnr)
   vim._with({ buf = bufnr }, function()
     local keymap = vim.fn.maparg('K', 'n', false, true)
     if keymap and keymap.callback == lsp.buf.hover and keymap.buffer == 1 then
-      vim.keymap.del('n', 'K', { buffer = bufnr })
+      vim.keymap.del('n', 'K', { buf = bufnr })
     end
   end)
 end

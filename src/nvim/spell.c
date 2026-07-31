@@ -1255,20 +1255,15 @@ bool no_spell_checking(win_T *wp)
   return false;
 }
 
-static void decor_spell_nav_start(win_T *wp)
-{
-  decor_state = (DecorState){ 0 };
-  decor_redraw_reset(wp, &decor_state);
-}
-
 static TriState decor_spell_nav_col(win_T *wp, linenr_T lnum, linenr_T *decor_lnum, int col)
 {
   if (*decor_lnum != lnum) {
+    decor_redraw_reset(wp, &decor_state);
     decor_providers_invoke_spell(wp, lnum - 1, col, lnum - 1, -1);
     decor_redraw_line(wp, lnum - 1, &decor_state);
     *decor_lnum = lnum;
   }
-  decor_redraw_col(wp, col, 0, false, &decor_state);
+  decor_redraw_col(wp, col, 0, false, &decor_state, MAXCOL);
   return decor_state.spell;
 }
 
@@ -1331,7 +1326,7 @@ size_t spell_move_to(win_T *wp, int dir, smt_T behaviour, bool curline, hlf_T *a
   // temporary DecorState.
   DecorState saved_decor_start = decor_state;
   linenr_T decor_lnum = -1;
-  decor_spell_nav_start(wp);
+  decor_state = (DecorState){ 0 };
 
   while (!got_int) {
     char *line = ml_get_buf(wp->w_buffer, lnum);
@@ -1485,7 +1480,7 @@ size_t spell_move_to(win_T *wp, int dir, smt_T behaviour, bool curline, hlf_T *a
         // starting line again and accept the last match.
         lnum = wp->w_buffer->b_ml.ml_line_count;
         wrapped = true;
-        if (!shortmess(SHM_SEARCH)) {
+        if (!shortmess(kShmSearch)) {
           give_warning(_(top_bot_msg), true, false);
         }
       }
@@ -1500,7 +1495,7 @@ size_t spell_move_to(win_T *wp, int dir, smt_T behaviour, bool curline, hlf_T *a
         // starting line again and accept the first match.
         lnum = 1;
         wrapped = true;
-        if (!shortmess(SHM_SEARCH)) {
+        if (!shortmess(kShmSearch)) {
           give_warning(_(bot_top_msg), true, false);
         }
       }
@@ -1683,6 +1678,14 @@ static void free_salitem(salitem_T *smp)
   xfree(smp->sm_to_w);
 }
 
+/// Free the salitem_T entries in a "sl_sal" garray (the SN_SAL form) and
+/// clear the garray.  Used by slang_clear() and when set_sofo() reuses
+/// sl_sal for the SN_SOFO form.
+void free_sal_items(garray_T *gap)
+{
+  GA_DEEP_CLEAR(gap, salitem_T, free_salitem);
+}
+
 /// Frees a fromto_T
 static void free_fromto(fromto_T *ftp)
 {
@@ -1711,8 +1714,7 @@ void slang_clear(slang_T *lp)
     // "ga_len" is set to 1 without adding an item for latin1
     GA_DEEP_CLEAR_PTR(gap);
   } else {
-    // SAL items: free salitem_T items
-    GA_DEEP_CLEAR(gap, salitem_T, free_salitem);
+    free_sal_items(gap);
   }
 
   for (int i = 0; i < lp->sl_prefixcnt; i++) {
@@ -1955,9 +1957,8 @@ char *parse_spelllang(win_T *wp)
   // Loop over comma separated language names.
   for (char *splp = spl_copy; *splp != NUL;) {
     // Get one language name.
-    copy_option_part(&splp, lang, MAXWLEN, ",");
+    int len = (int)copy_option_part(&splp, lang, MAXWLEN, ",");
     char *region = NULL;
-    int len = (int)strlen(lang);
 
     if (!valid_spelllang(lang)) {
       continue;
@@ -2089,8 +2090,8 @@ char *parse_spelllang(win_T *wp)
       int_wordlist_spl(spf_name);
     } else {
       // One entry in 'spellfile'.
-      copy_option_part(&spf, spf_name, MAXPATHL - 4, ",");
-      strcat(spf_name, ".spl");
+      int len = (int)copy_option_part(&spf, spf_name, MAXPATHL - 4, ",");
+      STRCPY(spf_name + len, ".spl");
       int c;
 
       // If it was already found above then skip it.
@@ -2651,7 +2652,7 @@ void ex_spellrepall(exarg_T *eap)
   }
   const size_t repl_from_len = strlen(repl_from);
   const size_t repl_to_len = strlen(repl_to);
-  const int addlen = (int)(repl_to_len - repl_from_len);
+  const int64_t addlen = (int64_t)repl_to_len - (int64_t)repl_from_len;
 
   const size_t frompatsize = repl_from_len + 7;
   char *frompat = xmalloc(frompatsize);
@@ -2672,7 +2673,7 @@ void ex_spellrepall(exarg_T *eap)
     char *line = get_cursor_line_ptr();
     if (addlen <= 0
         || strncmp(line + curwin->w_cursor.col, repl_to, repl_to_len) != 0) {
-      char *p = xmalloc((size_t)get_cursor_line_len() + (size_t)addlen + 1);
+      char *p = xmalloc((size_t)(get_cursor_line_len() + addlen) + 1);
       memmove(p, line, (size_t)curwin->w_cursor.col);
       STRCPY(p + curwin->w_cursor.col, repl_to);
       strcat(p, line + curwin->w_cursor.col + repl_from_len);
@@ -3219,13 +3220,13 @@ void ex_spelldump(exarg_T *eap)
   if (no_spell_checking(curwin)) {
     return;
   }
-  OptVal spl = get_option_value(kOptSpelllang, OPT_LOCAL);
+  Object spl = get_option_value(kOptSpelllang, OPT_LOCAL);
 
   // Create a new empty buffer in a new window.
   do_cmdline_cmd("new");
 
   // enable spelling locally in the new window
-  set_option_value_give_err(kOptSpell, BOOLEAN_OPTVAL(true), OPT_LOCAL);
+  set_option_value_give_err(kOptSpell, BOOLEAN_OBJ(true), OPT_LOCAL);
   set_option_value_give_err(kOptSpelllang, spl, OPT_LOCAL);
   optval_free(spl);
 
@@ -3572,7 +3573,7 @@ static linenr_T dump_prefixes(slang_T *slang, char *word, char *pat, Direction *
               }
             }
           }
-        } else {
+        } else if (depth < MAXWLEN - 1) {
           // Normal char, go one level deeper.
           prefix[depth++] = (char)c;
           arridx[depth] = idxs[n];

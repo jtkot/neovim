@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local t_lsp = require('test.functional.plugin.lsp.testutil')
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local dedent = t.dedent
 local eq = t.eq
 
@@ -271,16 +272,11 @@ describe('vim.lsp.inline_completion', function()
           return b;
         }]]),
         range = {
-          end_ = {
-            buf = 1,
-            col = 20,
-            row = 0,
-          },
-          start = {
-            buf = 1,
-            col = 0,
-            row = 0,
-          },
+          0,
+          0,
+          0,
+          20,
+          1,
         },
       }, result)
     end)

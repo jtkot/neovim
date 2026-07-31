@@ -6,7 +6,10 @@
 ---in quickfix list. Replaces the built-in `nvim -d` diff mode with this interface.
 ---</pre>
 ---
---- The plugin is not loaded by default; use `:packadd nvim.difftool` before invoking `:DiffTool`.
+--- The plugin is not loaded by default; use `:packadd` to activate it:
+--- ```
+--- :packadd nvim.difftool
+--- ```
 ---
 --- Example `git difftool -d` integration using `nvim -d` replacement:
 ---
@@ -114,11 +117,13 @@ local function diff_dirs_diffr(left_dir, right_dir, opt)
   table.insert(args, left_dir)
   table.insert(args, right_dir)
 
-  local lines = vim.fn.systemlist(args)
+  -- Force English locale so that we can rely on the output format
+  local result = vim.system(args, { text = true, env = { LC_ALL = 'C' } }):wait()
+  local lines = vim.split(result.stdout or '', '\n', { trimempty = true })
   local qf_entries = {}
 
   for _, line in ipairs(lines) do
-    local modified_left, modified_right = line:match('^Files (.+) and (.+) differ$')
+    local modified_left, modified_right = line:match("^Files '?(.-)'? and '?(.-)'? differ$")
     if modified_left and modified_right then
       local left_exists = vim.fn.filereadable(modified_left) == 1
       local right_exists = vim.fn.filereadable(modified_right) == 1
@@ -447,20 +452,20 @@ function M.open(left, right, opt)
   vim.api.nvim_create_autocmd('BufWinEnter', {
     group = layout.group,
     pattern = 'quickfix',
-    callback = function(args)
+    callback = function(ev)
       if not get_diff_entry() then
         return
       end
 
-      vim.api.nvim_buf_clear_namespace(args.buf, hl_id, 0, -1)
-      local lines = vim.api.nvim_buf_get_lines(args.buf, 0, -1, false)
+      vim.api.nvim_buf_clear_namespace(ev.buf, hl_id, 0, -1)
+      local lines = vim.api.nvim_buf_get_lines(ev.buf, 0, -1, false)
 
       -- Map status codes to highlight groups
       for i, line in ipairs(lines) do
         local status = line:match('^(%a) ')
         local hl_group = highlight_groups[status]
         if hl_group then
-          vim.hl.range(args.buf, hl_id, hl_group, { i - 1, 0 }, { i - 1, 1 })
+          vim.hl.range(ev.buf, hl_id, hl_group, { i - 1, 0 }, { i - 1, 1 })
         end
       end
     end,
@@ -469,8 +474,8 @@ function M.open(left, right, opt)
   vim.api.nvim_create_autocmd('BufWinEnter', {
     group = layout.group,
     pattern = '*',
-    callback = function(args)
-      local entry = get_diff_entry(args.buf)
+    callback = function(ev)
+      local entry = get_diff_entry(ev.buf)
       if not entry then
         return
       end

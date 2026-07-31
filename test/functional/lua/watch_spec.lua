@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local eq = t.eq
 local exec_lua = n.exec_lua
 local clear = n.clear
@@ -62,6 +63,7 @@ describe('vim._watch', function()
       if watchfunc == 'inotify' then
         skip(n.fn.executable('inotifywait') == 0, 'inotifywait not found')
         skip(is_os('bsd'), 'inotifywait on bsd CI seems to expect path to exist?')
+        skip(t.is_arch('s390x'), 'inotifywait not available on s390x CI')
       end
 
       local msg = ('watch.%s: ENOENT: no such file or directory'):format(watchfunc)
@@ -81,9 +83,10 @@ describe('vim._watch', function()
 
     it(watchfunc .. '() detects file changes', function()
       if watchfunc == 'inotify' then
-        skip(is_os('win'), 'not supported on windows')
+        skip(is_os('win'), 'N/A: inotify not supported on Windows')
         skip(is_os('mac'), 'flaky test on mac')
         skip(not is_ci() and n.fn.executable('inotifywait') == 0, 'inotifywait not found')
+        skip(t.is_arch('s390x'), 'inotifywait not available on s390x CI')
       end
 
       -- Note: because this is not `elseif`, BSD is skipped for *all* cases...?

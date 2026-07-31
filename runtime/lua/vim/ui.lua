@@ -1,48 +1,65 @@
-local M = {}
+local M = vim._defer_require('vim.ui', {
+  img = ..., --- @module 'vim.ui.img'
+})
 
 ---@class vim.ui.select.Opts
 ---@inlinedoc
 ---
---- Text of the prompt. Defaults to `Select one of:`
+--- Prompt text.
+--- (default: `"Select one of:"`)
 ---@field prompt? string
 ---
---- Function to format an
---- individual item from `items`. Defaults to `tostring`.
+--- Decides how to format items when displayed in the picker.
+--- (default: `tostring`)
 ---@field format_item? fun(item: any):string
 ---
---- Arbitrary hint string indicating the item shape.
---- Plugins reimplementing `vim.ui.select` may wish to
---- use this to infer the structure or semantics of
---- `items`, or the context in which select() was called.
+--- Decides how to preview an item by preparing a scratch buffer with the item details (including text, highlighting, etc.).
+--- When the picker decides to "preview" an item, it should call this function.
+--- Must return a table with these keys:
+---     - {buf}? (`integer`) Buffer containing the previewed item details, or nil if no preview should be shown.
+---     - {pos}? (`[integer, integer]`) Specifies the (1,0)-indexed cursor position in the preview buffer. If nil, should be treated as `{ 1, 0 }`.
+---     - {pos_end}? (`[integer, integer]`) Specifies the (1,0)-indexed (end-exclusive) end position of the preview range. If nil, no range is intended for a preview.
+---@field preview_item? fun(item: any):{buf?:integer, pos?:[integer,integer], pos_end?:[integer,integer]}
+---
+--- Arbitrary hint string indicating the item shape. The picker may wish to use this to infer the
+--- structure or semantics of `items`, or the context in which select() was called.
 ---@field kind? string
 
 --- Prompts the user to pick from a list of items, allowing arbitrary (potentially asynchronous)
---- work until `on_choice`.
+--- work until `on_choice`. This is the standard "picker" interface, used by |z=|, |:tselect|, etc.
+---
+--- Plugins may override `vim.ui.select` to provide a custom picker; they are expected to call the
+--- `format_item` and `preview_item` handlers (if any) provided by the caller. They may also use the
+--- `kind` hint (if provided by the caller) to decide how to handle some items.
+---
+--- Note: the default `vim.ui.select` currently doesn't support preview.
 ---
 --- Example:
 ---
 --- ```lua
 --- vim.ui.select({ 'tabs', 'spaces' }, {
----     prompt = 'Select tabs or spaces:',
----     format_item = function(item)
----         return "I'd like to choose " .. item
----     end,
+---   prompt = 'Select tabs or spaces:',
+---   format_item = function(item)
+---     return ('I choose %s!'):format(item)
+---   end,
+---   preview_item = function(item)
+---     local lines = { 'This is ' .. vim.inspect(item) }
+---     local buf = vim.api.nvim_create_buf(false, true)
+---     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+---     vim.bo[buf].bufhidden = 'wipe'
+---     return { buf = buf }
+---   end,
 --- }, function(choice)
----     if choice == 'spaces' then
----         vim.o.expandtab = true
----     else
----         vim.o.expandtab = false
----     end
+---   vim.o.expandtab = choice == 'spaces'
+---   vim.print(('Selected "%s" => expandtab=%s'):format(choice, vim.o.expandtab))
 --- end)
 --- ```
 ---
 ---@generic T
 ---@param items T[] Arbitrary items
----@param opts vim.ui.select.Opts Additional options
----@param on_choice fun(item: T|nil, idx: integer|nil)
----               Called once the user made a choice.
----               `idx` is the 1-based index of `item` within `items`.
----               `nil` if the user aborted the dialog.
+---@param opts vim.ui.select.Opts Options
+---@param on_choice fun(item: T|nil, idx: integer|nil) Called once the user made a choice.
+--- `idx` is the 1-based index of `item` within `items`, or `nil` if the user aborted the dialog.
 function M.select(items, opts, on_choice)
   vim.validate('items', items, 'table')
   vim.validate('on_choice', on_choice, 'function')
@@ -81,6 +98,12 @@ end
 ---Function that will be used for highlighting
 ---user inputs.
 ---@field highlight? function
+---
+---Input scope, as in "This input is for something at cursor/line/etc scope".
+---Can be used by `vim.ui.input` implementations to tweak behavior and presentation.
+---For example, the input may adjust the floating window position: near the cursor if
+---`cursor`, in window corner if `buffer` or `window`, etc.
+---@field scope? 'cursor'|'line'|'buffer'|'window'|'tabpage'|'editor'|'project'
 
 --- Prompts the user for input, allowing arbitrary (potentially asynchronous) work until
 --- `on_confirm`.
@@ -88,7 +111,8 @@ end
 --- Example:
 ---
 --- ```lua
---- vim.ui.input({ prompt = 'Enter value for shiftwidth: ' }, function(input)
+--- local opts = { prompt = 'Enter value for shiftwidth: ', scope = 'buffer' }
+--- vim.ui.input(opts, function(input)
 ---     vim.o.shiftwidth = tonumber(input)
 --- end)
 --- ```
@@ -304,6 +328,77 @@ function M._get_urls()
   end
 
   return urls
+end
+
+do
+  --- Cache of active progress messages, keyed by msg_id
+  --- TODO(justinmk): visibility of "stale" (never-finished) Progress. https://github.com/neovim/neovim/pull/35428#discussion_r2942696157
+  ---@type table<integer, vim.event.progress.data>
+  local progress = {}
+
+  -- store progress events
+  local progress_group, progress_autocmd = nil, nil
+
+  --- Initialize Progress handlers.
+  local function progress_init()
+    progress_group = vim.api.nvim_create_augroup('nvim.ui.progress_status', { clear = true })
+    progress_autocmd = require('vim._core.util').nvim_on(
+      'Progress',
+      progress_group,
+      {
+        desc = 'Tracks progress messages for vim.ui.progress_status()',
+      }, ---@param ev {data: vim.event.progress.data}
+      function(ev)
+        if not ev.data or not ev.data.id then
+          return
+        end
+        ev.data.percent = ev.data.percent or 0
+        progress[ev.data.id] = ev.data
+
+        -- Clear finished items
+        if
+          ev.data.status == 'success'
+          or ev.data.percent == 100
+          or ev.data.status == 'failed'
+          or ev.data.status == 'cancel'
+        then
+          progress[ev.data.id] = nil
+        end
+      end
+    )
+  end
+
+  --- Gets a status description summarizing currently running progress messages.
+  --- - If none: returns empty string
+  --- - If N item running: "AVG%(N)"
+  ---@param running vim.event.progress.data[]
+  ---@return string
+  local function progress_status_fmt(running)
+    local count = #running
+    if count == 0 then
+      return '' -- nothing to show
+    else
+      local sum = 0 ---@type integer
+      for _, progress_item in ipairs(running) do
+        sum = sum + (progress_item.percent or 0)
+      end
+      local avg = math.floor(sum / count)
+      return string.format('%d%%%%(%d) ', avg, count)
+    end
+  end
+
+  --- Gets a status description summarizing currently running progress messages.
+  --- Convenient for inclusion in 'statusline'.
+  ---
+  ---@return string # Progress status
+  function M.progress_status()
+    if progress_autocmd == nil then
+      progress_init()
+    end
+
+    local running = vim.tbl_values(progress)
+    return progress_status_fmt(running) or ''
+  end
 end
 
 return M

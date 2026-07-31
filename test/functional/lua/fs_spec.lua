@@ -1,9 +1,12 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, after_each, setup, pending, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.setup, t.pending, t.finally
 local clear = n.clear
 local exec_lua = n.exec_lua
 local eq = t.eq
+local eq_paths = t.eq_paths
 local mkdir_p = n.mkdir_p
 local rmdir = n.rmdir
 local nvim_dir = n.nvim_dir
@@ -99,6 +102,10 @@ describe('vim.fs', function()
         test_paths(tests_windows_paths, true)
       end
     end)
+
+    it('trims redundant slashes #37698', function()
+      eq('/name', vim.fs.dirname('/name//////////'))
+    end)
   end)
 
   describe('basename()', function()
@@ -126,6 +133,12 @@ describe('vim.fs', function()
       if is_os('win') then
         test_paths(tests_windows_paths, true)
       end
+    end)
+
+    it('trims redundant slashes #37698', function()
+      -- XXX: for better or worse, this matches python's `os.path.basename`.
+      -- https://github.com/neovim/neovim/issues/37698#issuecomment-3847866806
+      eq('', vim.fs.basename('/name//////////'))
     end)
   end)
 
@@ -241,6 +254,122 @@ describe('vim.fs', function()
         end)
       )
     end)
+
+    describe('fs_scandir_next fallback', function()
+      before_each(function()
+        mkdir('testdir')
+        t.write_file('testdir/test.txt', 'test file')
+      end)
+
+      after_each(function()
+        rmdir('testdir')
+      end)
+
+      it('falls back to fs_lstat when fs_scandir_next returns nil type', function()
+        local result = n.exec_lua([[
+          local orig = vim.uv.fs_scandir_next
+
+          vim.uv.fs_scandir_next = function(fs)
+            local name = orig(fs)
+            if name then
+              return name, nil
+            end
+            return name
+          end
+
+          local out = {}
+          for name, etype in vim.fs.dir('testdir') do
+            out[name] = etype
+          end
+
+          vim.uv.fs_scandir_next = orig
+          return out
+        ]])
+
+        eq('file', result['test.txt'])
+      end)
+    end)
+
+    it('reports errors', function()
+      mkdir('testdir')
+      mkdir('testdir/noaccess')
+      mkdir('testdir/a')
+      mkdir('testdir/a/noaccess')
+      finally(function()
+        rmdir('testdir')
+      end)
+
+      -- With opts.err=false: errors are silent, unreadable root looks empty.
+      eq(
+        0,
+        exec_lua(function()
+          local n0 = 0
+          for _ in vim.fs.dir('does-not-exist') do
+            n0 = n0 + 1
+          end
+          return n0
+        end)
+      )
+
+      -- With opts.err=true: unreadable root dir yields a single (name, nil, err).
+      eq(
+        { name = 'does-not-exist', err = 'ENOENT: no such file or directory: does-not-exist' },
+        exec_lua(function()
+          for name, type, err in vim.fs.dir('does-not-exist', { err = true }) do
+            return { name = name, type = type, err = err }
+          end
+        end)
+      )
+
+      -- With opts.err=true: unreadable child dir.
+      local result = exec_lua(function()
+        -- Stub fs_scandir since chmod doesn't work reliably on Windows.
+        local orig_scandir = vim.uv.fs_scandir
+        vim.uv.fs_scandir = function(path, ...)
+          if path == 'testdir/noaccess' then
+            return nil, 'EACCES: permission denied: testdir/noaccess'
+          end
+          return orig_scandir(path, ...)
+        end
+
+        local errors = {} ---@type table<string, string>
+        for f, _, err in vim.fs.dir('testdir', { depth = 2, err = true }) do
+          errors[f] = err
+        end
+
+        vim.uv.fs_scandir = orig_scandir
+        return errors
+      end)
+      eq('EACCES: permission denied: testdir/noaccess', result['noaccess'])
+      -- nil: with depth=2 we don't scan testdir/a/noaccess.
+      eq(nil, result['a/noaccess'])
+    end)
+
+    it('opts.normalize=false uses {path} literally', function()
+      mkdir('testdir')
+      mkdir('testdir/$XTEST_FS_DIR')
+      mkdir('testdir/expanded')
+      t.write_file('testdir/$XTEST_FS_DIR/literal.txt', '')
+      t.write_file('testdir/expanded/expanded.txt', '')
+      finally(function()
+        rmdir('testdir')
+      end)
+
+      eq(
+        { { ['expanded.txt'] = 'file' }, { ['literal.txt'] = 'file' } },
+        exec_lua(function()
+          vim.uv.os_setenv('XTEST_FS_DIR', 'expanded')
+          local out = {} ---@type table<string, string>[]
+          for i, normalize in ipairs({ true, false }) do
+            out[i] = {}
+            for name, etype in vim.fs.dir('testdir/$XTEST_FS_DIR', { normalize = normalize }) do
+              out[i][name] = etype
+            end
+          end
+          return out
+        end)
+      )
+    end)
   end)
 
   describe('find()', function()
@@ -254,6 +383,12 @@ describe('vim.fs', function()
       local parent, name = nvim_dir:match('^(.*/)([^/]+)$')
       eq({ nvim_dir }, vim.fs.find(name, { path = parent, upward = true, type = 'directory' }))
     end)
+
+    local function filter_zig_cache(list)
+      return vim.tbl_filter(function(val)
+        return not vim.startswith(val, test_source_path .. '/.zig-cache/')
+      end, list)
+    end
 
     it('follows symlinks', function()
       local build_dir = test_build_dir ---@type string
@@ -277,17 +412,14 @@ describe('vim.fs', function()
         })
       )
 
-      if t.is_zig_build() then
-        return pending('broken with build.zig')
-      end
       eq(
         { nvim_prog },
-        vim.fs.find(nvim_prog_basename, {
+        filter_zig_cache(vim.fs.find(nvim_prog_basename, {
           path = test_source_path,
           type = 'file',
           limit = 2,
           follow = false,
-        })
+        }))
       )
     end)
 
@@ -295,8 +427,8 @@ describe('vim.fs', function()
       if t.is_zig_build() then
         return pending('broken/slow with build.zig')
       end
-      local cwd = test_source_path ---@type string
-      local symlink = test_source_path .. '/loop_link' ---@type string
+      local cwd = vim.uv.fs_realpath(test_source_path) ---@type string
+      local symlink = cwd .. '/loop_link' ---@type string
       vim.uv.fs_symlink(cwd, symlink, { junction = true, dir = true })
 
       finally(function()
@@ -304,7 +436,7 @@ describe('vim.fs', function()
       end)
 
       eq(link_limit, #vim.fs.find(nvim_prog_basename, {
-        path = test_source_path,
+        path = cwd,
         type = 'file',
         limit = math.huge,
         follow = true,
@@ -348,6 +480,83 @@ describe('vim.fs', function()
         )
       )
     end)
+
+    it('reports errors', function()
+      mkdir('testdir')
+      mkdir('testdir/noaccess')
+      mkdir('testdir/a')
+      mkdir('testdir/a/noaccess')
+      t.write_file('testdir/a/match.lua', '')
+      finally(function()
+        rmdir('testdir')
+      end)
+
+      -- Scenarios run in a shared setup(clear) so the fs_scandir/fs_access stubs (chmod is unreliable on
+      -- Windows) are installed and restored.
+      local res = exec_lua(function()
+        local orig_scandir = vim.uv.fs_scandir
+        local orig_access = vim.uv.fs_access
+        local function is_blocked(path)
+          for _, prefix in ipairs({ 'testdir/noaccess', 'testdir/a/noaccess' }) do
+            if path == prefix or vim.startswith(path, prefix .. '/') then
+              return true
+            end
+          end
+          return false
+        end
+        vim.uv.fs_scandir = function(path, ...)
+          if is_blocked(path) then
+            return nil, 'EACCES: permission denied: ' .. path
+          end
+          return orig_scandir(path, ...)
+        end
+        vim.uv.fs_access = function(path, ...)
+          if is_blocked(path) then
+            return nil, 'EACCES: permission denied: ' .. path
+          end
+          return orig_access(path, ...)
+        end
+
+        local r = {}
+        r.nonexistent = { vim.fs.find('foo', { path = 'does-not-exist' }) }
+        r.unreadable_root = { vim.fs.find('foo', { path = 'testdir/noaccess' }) }
+        local dmatches, derrors =
+          vim.fs.find('match.lua', { path = 'testdir', limit = math.huge, type = 'file' })
+        table.sort(derrors) -- readdir order is not deterministic
+        r.downward = { dmatches, derrors }
+        r.upward = select(
+          2,
+          vim.fs.find('match.lua', {
+            path = 'testdir/noaccess/x',
+            upward = true,
+            stop = 'testdir',
+          })
+        )
+
+        vim.uv.fs_scandir = orig_scandir
+        vim.uv.fs_access = orig_access
+        return r
+      end)
+
+      -- Nonexistent / unreadable root path: no matches, one error.
+      eq({ {}, { 'ENOENT: no such file or directory: does-not-exist' } }, res.nonexistent)
+      eq({ {}, { 'EACCES: permission denied: testdir/noaccess' } }, res.unreadable_root)
+
+      -- Downward search collects child errors, yet still returns the match found elsewhere.
+      eq({
+        { 'testdir/a/match.lua' },
+        {
+          'EACCES: permission denied: testdir/a/noaccess',
+          'EACCES: permission denied: testdir/noaccess',
+        },
+      }, res.downward)
+
+      -- Upward search reports an error for each unreadable ancestor, in traversal order.
+      eq({
+        'EACCES: permission denied: testdir/noaccess/x',
+        'EACCES: permission denied: testdir/noaccess',
+      }, res.upward)
+    end)
   end)
 
   describe('root()', function()
@@ -360,12 +569,12 @@ describe('vim.fs', function()
     end)
 
     it('works with a single marker', function()
-      eq(test_source_path, exec_lua([[return vim.fs.root(0, 'CMakePresets.json')]]))
+      eq_paths(test_source_path, exec_lua([[return vim.fs.root(0, 'CMakePresets.json')]]))
     end)
 
     it('works with multiple markers', function()
       local bufnr = api.nvim_get_current_buf()
-      eq(
+      eq_paths(
         vim.fs.joinpath(test_source_path, 'test/functional/fixtures'),
         exec_lua([[return vim.fs.root(..., {'CMakeLists.txt', 'CMakePresets.json'})]], bufnr)
       )
@@ -373,29 +582,29 @@ describe('vim.fs', function()
 
     it('nested markers have equal priority', function()
       local bufnr = api.nvim_get_current_buf()
-      eq(
+      eq_paths(
         vim.fs.joinpath(test_source_path, 'test/functional'),
         exec_lua(
           [[return vim.fs.root(..., { 'example_spec.lua', {'CMakeLists.txt', 'CMakePresets.json'}, '.luarc.json'})]],
           bufnr
         )
       )
-      eq(
+      eq_paths(
         vim.fs.joinpath(test_source_path, 'test/functional/fixtures'),
         exec_lua(
           [[return vim.fs.root(..., { {'CMakeLists.txt', 'CMakePresets.json'}, 'example_spec.lua', '.luarc.json'})]],
           bufnr
         )
       )
-      eq(
+      eq_paths(
         vim.fs.joinpath(test_source_path, 'test/functional/fixtures'),
         exec_lua(
           [[return vim.fs.root(..., {
-            function(name, _)
-              return name:match('%.txt$')
-            end,
-            'example_spec.lua',
-            '.luarc.json' })]],
+              function(name, _)
+                return name:match('%.txt$')
+              end,
+              'example_spec.lua',
+              '.luarc.json' })]],
           bufnr
         )
       )
@@ -408,7 +617,7 @@ describe('vim.fs', function()
           return name:match('%.txt$')
         end)
       end)
-      eq(vim.fs.joinpath(test_source_path, 'test/functional/fixtures'), result)
+      eq_paths(vim.fs.joinpath(test_source_path, 'test/functional/fixtures'), result)
     end)
 
     it('works with a filename argument', function()
@@ -416,7 +625,7 @@ describe('vim.fs', function()
     end)
 
     it('works with a relative path', function()
-      eq(
+      eq_paths(
         test_source_path,
         exec_lua([[return vim.fs.root(..., 'CMakePresets.json')]], vim.fs.basename(nvim_prog))
       )
@@ -425,10 +634,7 @@ describe('vim.fs', function()
     it('returns CWD (absolute path) for unnamed buffers', function()
       assert(n.fn.isabsolutepath(test_source_path) == 1)
       command('new')
-      eq(
-        t.fix_slashes(test_source_path),
-        t.fix_slashes(exec_lua([[return vim.fs.root(0, 'CMakePresets.json')]]))
-      )
+      eq_paths(test_source_path, exec_lua([[return vim.fs.root(0, 'CMakePresets.json')]]))
     end)
 
     it("returns CWD (absolute path) for buffers with non-empty 'buftype'", function()
@@ -436,17 +642,14 @@ describe('vim.fs', function()
       command('new')
       command('set buftype=nofile')
       command('file lua://')
-      eq(
-        t.fix_slashes(test_source_path),
-        t.fix_slashes(exec_lua([[return vim.fs.root(0, 'CMakePresets.json')]]))
-      )
+      eq_paths(test_source_path, exec_lua([[return vim.fs.root(0, 'CMakePresets.json')]]))
     end)
 
     it('returns CWD (absolute path) if no match is found', function()
       assert(n.fn.isabsolutepath(test_source_path) == 1)
-      eq(
-        t.fix_slashes(test_source_path),
-        t.fix_slashes(exec_lua([[return vim.fs.root('file://bogus', 'CMakePresets.json')]]))
+      eq_paths(
+        test_source_path,
+        exec_lua([[return vim.fs.root('file://bogus', 'CMakePresets.json')]])
       )
     end)
   end)
@@ -756,6 +959,12 @@ describe('vim.fs', function()
       assert_rm_symlinked_dir({ force = true })
       assert_rm_symlinked_dir({ recursive = true })
       assert_rm_symlinked_dir({ recursive = true, force = true })
+    end)
+  end)
+
+  describe('ext()', function()
+    it('works', function()
+      -- See test/functional/vimscript/fnamemodify_spec.lua
     end)
   end)
 end)

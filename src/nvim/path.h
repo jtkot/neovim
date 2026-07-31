@@ -2,6 +2,7 @@
 
 #include <stddef.h>  // IWYU pragma: keep
 
+#include "nvim/api/private/defs.h"  // IWYU pragma: keep
 #include "nvim/garray_defs.h"  // IWYU pragma: keep
 #include "nvim/types_defs.h"  // IWYU pragma: keep
 
@@ -39,5 +40,23 @@ typedef enum file_comparison {
   kOneFileMissing = 6,    ///< One of them doesn't exist.
   kEqualFileNames = 7,  ///< Both don't exist and file names are same.
 } FileComparison;
+
+#ifdef BACKSLASH_IN_FILENAME
+# define TO_SLASH(p) path_to_slash(p)
+# define TO_SLASH_SAVE(p) path_to_slash_save(p)
+# define TO_BACKSLASH(p) path_to_backslash(p)
+#else
+# define TO_SLASH(...)
+# define TO_SLASH_SAVE(p) xstrdup(p)
+# define TO_BACKSLASH(...)
+#endif
+
+#ifdef MSWIN
+# define PATH_ESC_WILDCARDS "*?["
+# define PATH_ALL_WILDCARDS "*?[`$"
+#else
+# define PATH_ESC_WILDCARDS "*?[{"
+# define PATH_ALL_WILDCARDS "*?[{`'$"
+#endif
 
 #include "path.h.generated.h"

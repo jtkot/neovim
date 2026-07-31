@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, finally = t.describe, t.it, t.before_each, t.finally
 local clear = n.clear
 local exec = n.exec
 local feed = n.feed
@@ -134,7 +135,7 @@ describe('normal', function()
 
   -- oldtest: Test_pos_percentage_in_turkish_locale()
   it('viewport position percentage in Turkish locale', function()
-    t.skip(not t.translations_enabled(), 'Nvim not built with ENABLE_TRANSLATIONS')
+    t.skip(not t.translations_enabled(), 'N/A: Nvim not built with ENABLE_TRANSLATIONS')
     t.skip(not pcall(exec, 'lang tr_TR.UTF-8'), 'Turkish locale not available')
 
     local build_dir = t.paths.test_build_dir
@@ -147,17 +148,17 @@ describe('normal', function()
     end)
 
     clear({ env = { LANG = 'tr_TR.UTF-8' } })
-    screen = Screen.new(75, 5)
+    screen = Screen.new(40, 5)
     exec('set ruler')
     exec('lang tr_TR.UTF-8')
     exec('put =range(1,40)')
     exec('5')
     screen:expect([[
-      3                                                                          |
-      ^4                                                                          |
-      5                                                                          |
-      6                                                                          |
-      40 more lines                                            5,1            %8 |
+      3                                       |
+      ^4                                       |
+      5                                       |
+      6                                       |
+      40 more lines         5,1            %8 |
     ]])
   end)
 end)

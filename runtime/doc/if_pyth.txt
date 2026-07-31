@@ -153,7 +153,7 @@ Overview >vim
 Methods of the "vim" module
 
 vim.command(str)					*python-command*
-	Executes the vim (ex-mode) command str.  Returns None.
+	Executes the Ex command str.  Returns None.
 	Examples: >vim
 	    :py vim.command("set tw=72")
 	    :py vim.command("%s/aaa/bbb/g")
@@ -170,7 +170,7 @@ vim.eval(str)						*python-eval*
 	- a string if the Vim expression evaluates to a string or number
 	- a list if the Vim expression evaluates to a Vim |list|
 	- a dictionary if the Vim expression evaluates to a Vim |dict|
-	- a boolean if Vim exression evaluates to |v:true| or |v:false|
+	- a boolean if Vim expression evaluates to |v:true| or |v:false|
 	- `None` if Vim expression evaluates to |v:null|
 	Dictionaries and lists are recursively expanded.
 	Examples: >vim

@@ -1,43 +1,58 @@
 --- @brief
 ---
----WARNING: This is an experimental interface intended to replace the message
----grid in the TUI.
+--- WARNING: This is an experimental feature intended to replace the builtin message + cmdline
+--- presentation layer.
 ---
----To enable the experimental UI (default opts shown):
----```lua
----require('vim._core.ui2').enable({
----  enable = true, -- Whether to enable or disable the UI.
----  msg = { -- Options related to the message module.
----    ---@type 'cmd'|'msg' Default message target, either in the
----    ---cmdline or in a separate ephemeral message window.
----    ---@type string|table<string, 'cmd'|'msg'|'pager'> Default message target
----    or table mapping |ui-messages| kinds to a target.
----    targets = 'cmd',
----    timeout = 4000, -- Time a message is visible in the message window.
----  },
----})
----```
+--- To enable this feature (default opts shown):
+--- ```lua
+--- require('vim._core.ui2').enable({
+---   enable = true, -- Whether to enable or disable the UI.
+---   msg = { -- Options related to the message module.
+---     ---@type string|table<string, 'cmd'|'msg'|'pager'> Default message target
+---     ---or table mapping |ui-messages| kinds, triggers and IDs to a target.
+---     ---Table keys are are matched as a Lua pattern to the message ID. 'default'
+---     ---mapping applies to any omitted kind: { default = 'cmd', progress = 'msg' }.
+---     targets = 'cmd',
+---     cmd = { -- Options related to messages in the cmdline window.
+---       -- Maximum height (rows if >=1, or % of 'lines' if <1) of messages expanded
+---       -- beyond 'cmdheight'; 0.999 for full height.
+---       height = 0.5,
+---     },
+---     dialog = { -- Options related to dialog window.
+---       height = 0.5, -- Maximum height.
+---     },
+---     msg = { -- Options related to msg window.
+---       height = 0.5, -- Maximum height.
+---       timeout = 4000, -- Time a message is visible in the message window.
+---     },
+---     pager = { -- Options related to message window.
+---       height = 0.999, -- Maximum height.
+---     },
+---   },
+--- })
+--- ```
 ---
----There are four separate window types used by this interface:
----- "cmd": The cmdline window; also used for 'showcmd', 'showmode', 'ruler', and
----  messages if 'cmdheight' > 0.
----- "msg": The message window; used for messages when 'cmdheight' == 0.
----- "pager": The pager window; used for |:messages| and certain messages
----   that should be shown in full.
----- "dialog": The dialog window; used for prompt messages that expect user input.
+--- There are four special windows/buffers for presenting messages and cmdline:
+--- - "cmd": Cmdline. Also used for 'showcmd', 'showmode', 'ruler', and messages by default.
+--- - "msg": Message window, shows ephemeral messages useful for 'cmdheight' == 0.
+--- - "pager": Pager window, shows |:messages| and certain messages that are never "collapsed".
+--- - "dialog": Dialog window, shows modal prompts that expect user input.
 ---
----These four windows are assigned the "cmd", "msg", "pager" and "dialog"
----'filetype' respectively. Use a |FileType| autocommand to configure any local
----options for these windows and their respective buffers.
+--- The buffer 'filetype' is set to the above-listed id ("cmd", "msg", …).
+--- Handle the |FileType| event to configure any local options for these
+--- windows and their respective buffers.
 ---
----Rather than a |hit-enter-prompt|, messages shown in the cmdline area that do
----not fit are appended with a `[+x]` "spill" indicator, where `x` indicates the
----spilled lines. To see the full message, the |g<| command can be used.
+--- Unlike the legacy |hit-enter| prompt, messages exceeding 'cmdheight' are
+--- instead "collapsed", followed by a `[+x]` "spill" indicator, where `x`
+--- indicates the spilled lines. To see the full messages, do either:
+--- - ENTER immediately after interactive |:| cmdline shows a message and returns to |Normal-mode|.
+--- - |g<| at any time.
 
 local api = vim.api
+local nvim_on = require('vim._core.util').nvim_on
 local M = {
   ns = api.nvim_create_namespace('nvim.ui2'),
-  augroup = api.nvim_create_augroup('nvim.ui2', {}),
+  augroup = api.nvim_create_augroup('nvim.ui2'),
   cmdheight = vim.o.cmdheight, -- 'cmdheight' option value set by user.
   redrawing = false, -- True when redrawing to display UI event.
   wins = { cmd = -1, dialog = -1, msg = -1, pager = -1 },
@@ -45,56 +60,57 @@ local M = {
   cfg = {
     enable = true,
     msg = { -- Options related to the message module.
-      target = 'cmd', ---@type 'cmd'|'msg' Default message target if not present in targets.
-      targets = {}, ---@type table<string, 'cmd'|'msg'|'pager'> Kind specific message targets.
-      timeout = 4000, -- Time a message is visible in the message window.
+      ---@type table<string, 'cmd'|'msg'|'pager'> Kind specific message targets.
+      targets = { default = 'cmd' },
+      cmd = { -- Options related to messages in the cmdline window.
+        height = 0.5, -- Maximum height while expanded for messages beyond 'cmdheight'.
+      },
+      dialog = { -- Options related to dialog window.
+        height = 0.5, -- Maximum height.
+      },
+      msg = { -- Options related to msg window.
+        height = 0.5, -- Maximum height.
+        timeout = 4000, -- Time a message is visible in the message window.
+      },
+      pager = { -- Options related to message window.
+        height = 0.999, -- Maximum height.
+      },
     },
   },
 }
---- @type vim.api.keyset.win_config
-local wincfg = { -- Default cfg for nvim_open_win().
-  relative = 'laststatus',
-  style = 'minimal',
-  col = 0,
-  row = 1,
-  width = 10000,
-  height = 1,
-  noautocmd = true,
-  focusable = false,
-}
 
-local tab = 0
 ---Ensure target buffers and windows are still valid.
 function M.check_targets()
   local curtab = api.nvim_get_current_tabpage()
   for i, type in ipairs({ 'cmd', 'dialog', 'msg', 'pager' }) do
-    local setopt = not api.nvim_buf_is_valid(M.bufs[type])
-    if setopt then
-      M.bufs[type] = api.nvim_create_buf(false, false)
-    end
+    local buf = api.nvim_buf_is_valid(M.bufs[type]) and M.bufs[type]
+    local win = api.nvim_win_is_valid(M.wins[type]) and M.wins[type]
+    local floating = win and api.nvim_win_get_config(win).zindex
+    local setopt = not buf or not win or not floating
+    M.bufs[type] = buf or api.nvim_create_buf(false, false)
 
-    if
-      tab ~= curtab
-      or not api.nvim_win_is_valid(M.wins[type])
-      or not api.nvim_win_get_config(M.wins[type]).zindex -- no longer floating
-    then
-      local cfg = vim.tbl_deep_extend('force', wincfg, {
-        mouse = type ~= 'cmd' and true or nil,
-        anchor = type ~= 'cmd' and 'SE' or nil,
-        hide = type ~= 'cmd' or M.cmdheight == 0 or nil,
-        border = type ~= 'msg' and 'none' or nil,
-        -- kZIndexMessages < cmd zindex < kZIndexCmdlinePopupMenu (grid_defs.h), pager below others.
-        zindex = 201 - i,
-        _cmdline_offset = type == 'cmd' and 0 or nil,
-      })
-      if tab ~= curtab and api.nvim_win_is_valid(M.wins[type]) then
-        cfg = api.nvim_win_get_config(M.wins[type])
-        api.nvim_win_close(M.wins[type], true)
-      end
-      M.wins[type] = api.nvim_open_win(M.bufs[type], false, cfg)
-      setopt = true
-    elseif api.nvim_win_get_buf(M.wins[type]) ~= M.bufs[type] then
-      api.nvim_win_set_buf(M.wins[type], M.bufs[type])
+    if not win or not floating then
+      -- Open a new window when closed or no longer floating (e.g. wincmd J).
+      local cfg = { col = 0, row = 1, width = 10000, height = 1, noautocmd = true }
+      cfg.focusable = false
+      cfg.style = 'minimal'
+      cfg.relative = 'laststatus'
+      cfg.anchor = type ~= 'cmd' and 'SE' or nil
+      cfg.mouse = type == 'pager' or nil
+      cfg.border = type ~= 'msg' and 'none' or nil
+      cfg._cmdline_offset = type == 'cmd' and 0 or nil
+      cfg.hide = type ~= 'cmd' or M.cmdheight == 0 or nil
+      -- kZIndexMessages < cmd zindex < kZIndexCmdlinePopupMenu (grid_defs.h), pager below others.
+      cfg.zindex = 201 - i
+      -- Open the window without fileinfo notifications
+      vim._with({ silent = true }, function()
+        M.wins[type] = api.nvim_open_win(M.bufs[type], false, cfg)
+      end)
+    elseif api.nvim_win_get_tabpage(M.wins[type]) ~= curtab then
+      api.nvim_win_set_config(M.wins[type], { win = api.nvim_tabpage_get_win(curtab) })
+    end
+    if win and floating and api.nvim_win_get_buf(win) ~= M.bufs[type] then
+      api.nvim_win_set_buf(win, M.bufs[type])
       setopt = true
     end
 
@@ -110,6 +126,7 @@ function M.check_targets()
         api.nvim_set_option_value('showbreak', '', { scope = 'local' })
         api.nvim_set_option_value('spell', false, { scope = 'local' })
         api.nvim_set_option_value('swapfile', false, { scope = 'local' })
+        api.nvim_set_option_value('modeline', false, { scope = 'local' })
         api.nvim_set_option_value('modifiable', true, { scope = 'local' })
         api.nvim_set_option_value('bufhidden', 'hide', { scope = 'local' })
         api.nvim_set_option_value('buftype', 'nofile', { scope = 'local' })
@@ -120,6 +137,8 @@ function M.check_targets()
           hl = 'Normal:MsgArea'
         elseif type == 'msg' then
           hl = search_hide
+        elseif type == 'cmd' then
+          api.nvim_set_option_value('winpinned', true, { scope = 'local' })
         end
         api.nvim_set_option_value('winhighlight', hl, { scope = 'local' })
       end)
@@ -131,13 +150,12 @@ function M.check_targets()
 
       if type == 'pager' then
         -- Close pager with `q`, same as `checkhealth`
-        api.nvim_buf_set_keymap(M.bufs.pager, 'n', 'q', '<Cmd>wincmd c<CR>', {})
-      elseif type == M.cfg.msg.target then
-        M.msg.prev_msg = '' -- Will no longer be visible.
+        api.nvim_buf_set_keymap(M.bufs.pager, 'n', 'q', '<Cmd>wincmd c<CR>')
+      elseif M.msg[type] then
+        M.msg[type].prev_msg = '' -- Will no longer be visible.
       end
     end
   end
-  tab = curtab
 end
 
 local function ui_callback(redraw_msg, event, ...)
@@ -159,10 +177,12 @@ local scheduled_ui_callback = vim.schedule_wrap(ui_callback)
 
 ---@nodoc
 function M.enable(opts)
+  opts = opts or {}
   vim.validate('opts', opts, 'table', true)
   M.cfg = vim.tbl_deep_extend('keep', opts, M.cfg)
-  M.cfg.msg.target = type(M.cfg.msg.targets) == 'string' and M.cfg.msg.targets or M.cfg.msg.target
-  M.cfg.msg.targets = type(M.cfg.msg.targets) == 'table' and M.cfg.msg.targets or {}
+  M.cfg.msg.targets = type(M.cfg.msg.targets) == 'table' and M.cfg.msg.targets
+    or { default = M.cfg.msg.targets }
+  M.cfg.msg.targets.default = M.cfg.msg.targets.default or 'cmd'
   if #vim.api.nvim_list_uis() == 0 then
     return -- Don't prevent stdout messaging when no UIs are attached.
   end
@@ -170,14 +190,10 @@ function M.enable(opts)
   if M.cfg.enable == false then
     -- Detach and cleanup windows, buffers and autocommands.
     for _, win in pairs(M.wins) do
-      if api.nvim_win_is_valid(win) then
-        api.nvim_win_close(win, true)
-      end
+      pcall(api.nvim_win_close, win, true)
     end
     for _, buf in pairs(M.bufs) do
-      if api.nvim_buf_is_valid(buf) then
-        api.nvim_buf_delete(buf, {})
-      end
+      pcall(api.nvim_buf_delete, buf, {})
     end
     api.nvim_clear_autocmds({ group = M.augroup })
     vim.ui_detach(M.ns)
@@ -217,35 +233,26 @@ function M.enable(opts)
     end)
   end
 
-  api.nvim_create_autocmd('OptionSet', {
-    group = M.augroup,
+  nvim_on('OptionSet', M.augroup, {
     pattern = { 'cmdheight', 'laststatus' },
-    callback = function(ev)
-      if ev.match == 'cmdheight' then
-        check_cmdheight(vim.v.option_new)
-      end
-      M.msg.set_pos()
-    end,
     desc = 'Set cmdline and message window dimensions for changed option values.',
-  })
+  }, function(ev)
+    if ev.match == 'cmdheight' then
+      check_cmdheight(vim.v.option_new)
+    end
+    M.msg.set_pos()
+  end)
 
-  api.nvim_create_autocmd({ 'VimResized', 'TabEnter' }, {
-    group = M.augroup,
-    callback = function()
-      M.msg.set_pos()
-    end,
+  nvim_on({ 'VimResized', 'TabEnter' }, M.augroup, {
     desc = 'Set cmdline and message window dimensions after shell resize or tabpage change.',
-  })
-
-  api.nvim_create_autocmd('WinEnter', {
-    callback = function()
-      local win = api.nvim_get_current_win()
-      if vim.tbl_contains(M.wins, win) and api.nvim_win_get_config(win).hide then
-        vim.cmd.wincmd('p')
-      end
-    end,
-    desc = 'Make sure hidden UI window is never current.',
-  })
+  }, function(ev)
+    M.check_targets()
+    -- After a tabpage was closed unhide the msg window on the current tabpage.
+    if ev.event == 'TabEnter' and next(M.msg.msg.ids) ~= nil then
+      api.nvim_win_set_config(M.wins.msg, { hide = false, width = M.msg.msg.width })
+    end
+    M.msg.set_pos()
+  end)
 end
 
 return M

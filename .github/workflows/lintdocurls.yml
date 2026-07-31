@@ -4,6 +4,8 @@ on:
     - cron: '22 22 * * 5'
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   check-unreachable-urls:
     runs-on: ubuntu-latest
@@ -12,9 +14,10 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up git config
         run: |

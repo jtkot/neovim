@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local t_lsp = require('test.functional.plugin.lsp.testutil')
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local dedent = t.dedent
 local eq = t.eq
 
@@ -16,7 +17,6 @@ local create_server_definition = t_lsp.create_server_definition
 
 describe('vim.lsp.codelens', function()
   local text = dedent([[
-    https://github.com/neovim/neovim/issues/16166
     struct S {
         a: i32,
         b: String,
@@ -35,8 +35,7 @@ describe('vim.lsp.codelens', function()
   ]])
 
   local grid_with_lenses = dedent([[
-    ^https://github.com/neovim/neovim/issues/16166        |
-    {1:1 implementation}                                     |
+    {1:       1 implementation}                              |
     struct S {                                           |
         a: i32,                                          |
         b: String,                                       |
@@ -48,17 +47,17 @@ describe('vim.lsp.codelens', function()
         }                                                |
     }                                                    |
                                                          |
-    {1:▶︎ Run }                                               |
+    {1:   ▶︎ Run }                                            |
     fn main() {                                          |
         let s = S::new(42, String::from("Hello, world!"))|
     ;                                                    |
         println!("S.a: {}, S.b: {}", s.a, s.b);          |
     }                                                    |
-                                                         |*2
+    ^                                                     |
+                                                         |
   ]])
 
   local grid_without_lenses = dedent([[
-    ^https://github.com/neovim/neovim/issues/16166        |
     struct S {                                           |
         a: i32,                                          |
         b: String,                                       |
@@ -75,7 +74,7 @@ describe('vim.lsp.codelens', function()
     ;                                                    |
         println!("S.a: {}, S.b: {}", s.a, s.b);          |
     }                                                    |
-                                                         |
+    ^                                                     |
     {1:~                                                    }|*2
                                                          |
   ]])
@@ -89,12 +88,18 @@ describe('vim.lsp.codelens', function()
   before_each(function()
     clear_notrace()
     exec_lua(create_server_definition)
+    exec_lua(function()
+      vim.lsp.config('*', {
+        flags = { debounce_text_changes = 0 },
+      })
+    end)
 
-    screen = Screen.new(nil, 21)
+    screen = Screen.new(nil, 20)
 
     client_id = exec_lua(function()
       _G.server = _G._create_server({
         capabilities = {
+          textDocumentSync = vim.lsp.protocol.TextDocumentSyncKind.Full,
           codeLensProvider = {
             resolveProvider = true,
           },
@@ -108,7 +113,7 @@ describe('vim.lsp.codelens', function()
                     impls = {
                       position = {
                         character = 7,
-                        line = 1,
+                        line = 0,
                       },
                     },
                   },
@@ -117,11 +122,11 @@ describe('vim.lsp.codelens', function()
                 range = {
                   ['end'] = {
                     character = 8,
-                    line = 1,
+                    line = 0,
                   },
                   start = {
                     character = 7,
-                    line = 1,
+                    line = 0,
                   },
                 },
               },
@@ -134,11 +139,11 @@ describe('vim.lsp.codelens', function()
                 range = {
                   ['end'] = {
                     character = 7,
-                    line = 12,
+                    line = 11,
                   },
                   start = {
                     character = 3,
-                    line = 12,
+                    line = 11,
                   },
                 },
               },
@@ -155,11 +160,11 @@ describe('vim.lsp.codelens', function()
                 range = {
                   ['end'] = {
                     character = 8,
-                    line = 1,
+                    line = 0,
                   },
                   start = {
                     character = 7,
-                    line = 1,
+                    line = 0,
                   },
                 },
               })
@@ -177,16 +182,21 @@ describe('vim.lsp.codelens', function()
       vim.lsp.codelens.enable()
     end)
 
-    feed('gg')
     screen:expect({ grid = grid_with_lenses })
   end)
 
-  it('clears code lenses when disabled', function()
+  it('clears/shows code lenses when disabled/enabled', function()
     exec_lua(function()
       vim.lsp.codelens.enable(false)
     end)
 
     screen:expect({ grid = grid_without_lenses })
+
+    exec_lua(function()
+      vim.lsp.codelens.enable(true)
+    end)
+
+    screen:expect({ grid = grid_with_lenses })
   end)
 
   it('clears code lenses when sole client detaches', function()
@@ -215,11 +225,11 @@ describe('vim.lsp.codelens', function()
           range = {
             ['end'] = {
               character = 8,
-              line = 1,
+              line = 0,
             },
             start = {
               character = 7,
-              line = 1,
+              line = 0,
             },
           },
         },
@@ -235,11 +245,11 @@ describe('vim.lsp.codelens', function()
           range = {
             ['end'] = {
               character = 7,
-              line = 12,
+              line = 11,
             },
             start = {
               character = 3,
-              line = 12,
+              line = 11,
             },
           },
         },
@@ -248,11 +258,29 @@ describe('vim.lsp.codelens', function()
   end)
 
   it('refreshes code lenses on request', function()
-    feed('2Gdd')
+    local get_message_count = function()
+      local messages = exec_lua('return _G.server.messages')
+      local count = 0
+      for _, m in ipairs(messages) do
+        if m.method == 'textDocument/codeLens' then
+          count = count + 1
+        end
+      end
+      return count
+    end
+
+    eq(2, get_message_count())
+
+    feed('ggdd')
+
+    -- Second codelens (▶︎ Run) is not resolved immediately, so its previous extmark (same row) isn't
+    -- cleared and it stays anchored to where it was. The new one (which would effectively look like
+    -- it moved a row down) needs to be resolved first, which goes through another screen update.
+    -- This is a quirk of the test since it returns the exact same result no matter what the text in
+    -- the buffer actually is
 
     screen:expect([[
-      https://github.com/neovim/neovim/issues/16166        |
-      {1:1 implementation}                                     |
+      {1:       1 implementation}                              |
           ^a: i32,                                          |
           b: String,                                       |
       }                                                    |
@@ -263,16 +291,44 @@ describe('vim.lsp.codelens', function()
           }                                                |
       }                                                    |
                                                            |
-      {1:▶︎ Run }                                               |
+      {1:   ▶︎ Run }                                            |
       fn main() {                                          |
           let s = S::new(42, String::from("Hello, world!"))|
       ;                                                    |
           println!("S.a: {}, S.b: {}", s.a, s.b);          |
       }                                                    |
                                                            |
-      {1:~                                                    }|*1
+      {1:~                                                    }|
                                                            |
     ]])
+
+    eq(2, get_message_count())
+
+    screen:expect([[
+      {1:       1 implementation}                              |
+          ^a: i32,                                          |
+          b: String,                                       |
+      }                                                    |
+                                                           |
+      impl S {                                             |
+          fn new(a: i32, b: String) -> Self {              |
+              S { a, b }                                   |
+          }                                                |
+      }                                                    |
+                                                           |
+      fn main() {                                          |
+      {1:   ▶︎ Run }                                            |
+          let s = S::new(42, String::from("Hello, world!"))|
+      ;                                                    |
+          println!("S.a: {}, S.b: {}", s.a, s.b);          |
+      }                                                    |
+                                                           |
+      {1:~                                                    }|
+                                                           |
+    ]])
+
+    eq(3, get_message_count())
+
     exec_lua(function()
       vim.lsp.codelens.on_refresh(
         nil,
@@ -280,36 +336,172 @@ describe('vim.lsp.codelens', function()
         { method = 'workspace/codeLens/refresh', client_id = client_id }
       )
     end)
-    screen:expect([[
-      https://github.com/neovim/neovim/issues/16166        |
-      {1:    1 implementation}                                 |
-          ^a: i32,                                          |
-          b: String,                                       |
-      }                                                    |
-                                                           |
-      impl S {                                             |
-          fn new(a: i32, b: String) -> Self {              |
-              S { a, b }                                   |
-          }                                                |
-      }                                                    |
-                                                           |
-      fn main() {                                          |
-      {1:    ▶︎ Run }                                           |
-          let s = S::new(42, String::from("Hello, world!"))|
-      ;                                                    |
-          println!("S.a: {}, S.b: {}", s.a, s.b);          |
-      }                                                    |
-                                                           |
-      {1:~                                                    }|*1
-                                                           |
-    ]])
+
+    eq(4, get_message_count())
+  end)
+
+  it('ignores stale codeLens/resolve responses', function()
+    clear_notrace()
+    exec_lua(create_server_definition)
+
+    insert('line1\nline2\n')
+
+    exec_lua(function()
+      local codelens_request_count = 0
+      _G.stale_resolve_sent = false
+      _G.server = _G._create_server({
+        capabilities = {
+          textDocumentSync = vim.lsp.protocol.TextDocumentSyncKind.Full,
+          codeLensProvider = {
+            resolveProvider = true,
+          },
+        },
+        handlers = {
+          ['textDocument/codeLens'] = function(_, _, callback)
+            codelens_request_count = codelens_request_count + 1
+            if codelens_request_count == 1 then
+              callback(nil, {
+                {
+                  range = {
+                    ['end'] = {
+                      character = 1,
+                      line = 0,
+                    },
+                    start = {
+                      character = 0,
+                      line = 0,
+                    },
+                  },
+                },
+              })
+            else
+              callback(nil, {})
+            end
+          end,
+          ['codeLens/resolve'] = function(_, lens, callback)
+            vim.defer_fn(function()
+              _G.stale_resolve_sent = true
+              callback(nil, {
+                command = {
+                  arguments = {},
+                  command = 'dummy.command',
+                  title = 'resolved',
+                },
+                range = lens.range,
+              })
+            end, 100)
+          end,
+        },
+      })
+
+      local stale_client_id = vim.lsp.start({ name = 'dummy', cmd = _G.server.cmd })
+      vim.lsp.codelens.enable()
+      vim.wait(1000, function()
+        return #vim.lsp.codelens.get() > 0
+      end)
+
+      vim.api.nvim__redraw({ flush = true })
+
+      vim.lsp.codelens.on_refresh(nil, nil, {
+        method = 'workspace/codeLens/refresh',
+        client_id = stale_client_id,
+      })
+
+      assert(
+        vim.wait(1000, function()
+          return _G.stale_resolve_sent
+        end),
+        'timed out waiting for stale resolve response'
+      )
+    end)
+
+    eq('', api.nvim_get_vvar('errmsg'))
+  end)
+
+  it('ignores refresh responses for deleted buffer', function()
+    clear_notrace()
+    exec_lua(create_server_definition)
+
+    insert('line1\n')
+
+    exec_lua(function()
+      local codelens_request_count = 0
+      _G.refresh_response_sent = false
+      _G.server = _G._create_server({
+        capabilities = {
+          textDocumentSync = vim.lsp.protocol.TextDocumentSyncKind.Full,
+          codeLensProvider = {
+            resolveProvider = true,
+          },
+        },
+        handlers = {
+          ['textDocument/codeLens'] = function(_, _, callback)
+            codelens_request_count = codelens_request_count + 1
+
+            local lenses = {
+              {
+                command = {
+                  arguments = {},
+                  command = 'dummy.command',
+                  title = 'Lens',
+                },
+                range = {
+                  ['end'] = {
+                    character = 1,
+                    line = 0,
+                  },
+                  start = {
+                    character = 0,
+                    line = 0,
+                  },
+                },
+              },
+            }
+
+            if codelens_request_count == 1 then
+              callback(nil, lenses)
+            else
+              -- Delay the refresh response so the buffer is wiped before it arrives.
+              vim.schedule(function()
+                _G.refresh_response_sent = true
+                callback(nil, lenses)
+              end)
+            end
+          end,
+        },
+      })
+
+      local client_id = vim.lsp.start({ name = 'dummy', cmd = _G.server.cmd })
+      vim.lsp.codelens.enable()
+
+      assert(
+        vim.wait(1000, function()
+          return #vim.lsp.codelens.get() > 0
+        end),
+        'timed out waiting for initial codelens response'
+      )
+
+      vim.lsp.codelens.on_refresh(nil, nil, {
+        method = 'workspace/codeLens/refresh',
+        client_id = client_id,
+      })
+      vim.cmd.bwipeout({ bang = true })
+
+      assert(
+        vim.wait(1000, function()
+          return _G.refresh_response_sent
+        end),
+        'timed out waiting for refresh response'
+      )
+    end)
+
+    eq('', api.nvim_get_vvar('errmsg'))
   end)
 
   it('clears extmarks beyond the bottom of the buffer', function()
-    feed('13G4dd')
+    feed('12G4dd')
     screen:expect([[
-      https://github.com/neovim/neovim/issues/16166        |
-      {1:1 implementation}                                     |
+      {1:       1 implementation}                              |
       struct S {                                           |
           a: i32,                                          |
           b: String,                                       |
@@ -321,8 +513,27 @@ describe('vim.lsp.codelens', function()
           }                                                |
       }                                                    |
                                                            |
+      {1:▶︎ Run }                                               |
       ^                                                     |
-      {1:~                                                    }|*6
+      {1:~                                                    }|*5
+      4 fewer lines                                        |
+    ]])
+
+    feed('dd')
+    screen:expect([[
+      {1:       1 implementation}                              |
+      struct S {                                           |
+          a: i32,                                          |
+          b: String,                                       |
+      }                                                    |
+                                                           |
+      impl S {                                             |
+          fn new(a: i32, b: String) -> Self {              |
+              S { a, b }                                   |
+          }                                                |
+      }                                                    |
+      ^                                                     |
+      {1:~                                                    }|*7
       4 fewer lines                                        |
     ]])
   end)

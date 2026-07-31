@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local request = n.request
 local eq = t.eq
 local ok = t.ok
@@ -143,7 +144,7 @@ describe('API/extmarks', function()
     )
     -- No memory leak with virt_text, virt_lines, sign_text
     eq(
-      'right_gravity is not a boolean',
+      "Invalid 'right_gravity': expected boolean",
       pcall_err(set_extmark, ns, marks[2], 0, 0, {
         virt_text = { { 'foo', 'Normal' } },
         virt_lines = { { { 'bar', 'Normal' } } },
@@ -153,7 +154,7 @@ describe('API/extmarks', function()
     )
   end)
 
-  it('can end extranges past final newline using end_col = 0', function()
+  it('can end extranges past final newline using end_col=0', function()
     set_extmark(ns, marks[1], 0, 0, {
       end_col = 0,
       end_row = 1,
@@ -164,20 +165,39 @@ describe('API/extmarks', function()
     )
   end)
 
-  it('can end extranges past final newline when strict mode is false', function()
-    set_extmark(ns, marks[1], 0, 0, {
+  it('can end extranges past final newline when strict=false', function()
+    local id = set_extmark(ns, marks[1], 0, 0, {
       end_col = 1,
       end_row = 1,
       strict = false,
     })
+    ok(id > 0, 'id > 0', id)
   end)
 
-  it('can end extranges past final column when strict mode is false', function()
-    set_extmark(ns, marks[1], 0, 0, {
+  it('can end extranges past final column when strict=false', function()
+    local id = set_extmark(ns, marks[1], 0, 0, {
       end_col = 6,
       end_row = 0,
       strict = false,
     })
+    ok(id > 0, 'id > 0', id)
+  end)
+
+  it('end_col=-1 means "end of line" when strict=false', function()
+    local function _test(strict)
+      return set_extmark(ns, marks[1], 0, 0, {
+        end_col = -1,
+        end_row = 0,
+        strict = strict,
+      })
+    end
+
+    -- strict=false
+    local id = _test(false)
+    ok(id > 0, 'id > 0', id)
+
+    -- strict=true
+    eq("Invalid 'end_col': out of range", pcall_err(_test, true))
   end)
 
   it('adds, updates  and deletes marks', function()
@@ -519,7 +539,7 @@ describe('API/extmarks', function()
   end)
 
   it('marks move with char inserts', function()
-    -- insertchar in edit.c (the ins_str branch)
+    -- insertchar in insert.c (the ins_str branch)
     screen = Screen.new(15, 10)
     set_extmark(ns, marks[1], 0, 3)
     feed('0')
@@ -536,7 +556,7 @@ describe('API/extmarks', function()
 
   -- gravity right as definted in tk library
   it('marks have gravity right', function()
-    -- insertchar in edit.c (the ins_str branch)
+    -- insertchar in insert.c (the ins_str branch)
     set_extmark(ns, marks[1], 0, 2)
     feed('03l')
     insert('X')
@@ -549,7 +569,7 @@ describe('API/extmarks', function()
   end)
 
   it('we can insert multibyte chars', function()
-    -- insertchar in edit.c
+    -- insertchar in insert.c
     feed('a<cr>12345<esc>')
     set_extmark(ns, marks[1], 1, 2)
     -- Insert a fullwidth (two col) tilde, NICE
@@ -877,7 +897,7 @@ describe('API/extmarks', function()
   end)
 
   it('tab works with expandtab', function()
-    -- ins_tab in edit.c
+    -- ins_tab in insert.c
     feed(':set expandtab<cr><esc>')
     feed(':set shiftwidth=2<cr><esc>')
     set_extmark(ns, marks[1], 0, 2)
@@ -886,7 +906,7 @@ describe('API/extmarks', function()
   end)
 
   it('tabs work', function()
-    -- ins_tab in edit.c
+    -- ins_tab in insert.c
     feed(':set noexpandtab<cr><esc>')
     feed(':set shiftwidth=2<cr><esc>')
     feed(':set softtabstop=2<cr><esc>')
@@ -1719,6 +1739,50 @@ describe('API/extmarks', function()
       },
     }, get_extmark_by_id(ns, marks[3], { details = true }))
 
+    -- verify 'wrap' is returned through get_extmark_by_id to validate flag comparison
+    set_extmark(ns, marks[4], 0, 0, {
+      priority = 0,
+      ui_watched = true,
+      virt_lines = { { { '', 'Macro' }, { '' }, { '', '' } } },
+      virt_lines_overflow = 'wrap',
+    })
+    eq({
+      0,
+      0,
+      {
+        ns_id = ns,
+        right_gravity = true,
+        ui_watched = true,
+        priority = 0,
+        virt_lines = { { { '', 'Macro' }, { '' }, { '', '' } } },
+        virt_lines_above = false,
+        virt_lines_leftcol = false,
+        virt_lines_overflow = 'wrap',
+      },
+    }, get_extmark_by_id(ns, marks[4], { details = true }))
+
+    -- verify 'auto' is returned through get_extmark_by_id to validate flag comparison
+    set_extmark(ns, marks[5], 0, 0, {
+      priority = 0,
+      ui_watched = true,
+      virt_lines = { { { '', 'Macro' }, { '' }, { '', '' } } },
+      virt_lines_overflow = 'auto',
+    })
+    eq({
+      0,
+      0,
+      {
+        ns_id = ns,
+        right_gravity = true,
+        ui_watched = true,
+        priority = 0,
+        virt_lines = { { { '', 'Macro' }, { '' }, { '', '' } } },
+        virt_lines_above = false,
+        virt_lines_leftcol = false,
+        virt_lines_overflow = 'auto',
+      },
+    }, get_extmark_by_id(ns, marks[5], { details = true }))
+
     set_extmark(ns, marks[4], 0, 0, { cursorline_hl_group = 'Statement' })
     eq({
       0,
@@ -1939,6 +2003,16 @@ describe('API/extmarks', function()
         [2] = { foreground = Screen.colors.Blue1, bold = true },
       },
     }
+  end)
+
+  it('are invalidated when "nofile" buffer is unloaded', function()
+    local buf = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_name(buf, 'foo')
+    api.nvim_buf_set_lines(buf, 0, 0, false, { 'foo', 'bar' })
+    local id = api.nvim_buf_set_extmark(buf, ns, 1, 0, { invalidate = true })
+    api.nvim_buf_delete(buf, { unload = true })
+    local mark = { 0, 0, { invalid = true, invalidate = true, ns_id = 3, right_gravity = true } }
+    eq(mark, api.nvim_buf_get_extmark_by_id(buf, ns, id, { details = true }))
   end)
 end)
 

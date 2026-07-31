@@ -31,6 +31,7 @@ typedef struct {
   pos_T start;             ///< start of the operator
   pos_T end;               ///< end of the operator
   pos_T cursor_start;      ///< cursor position before motion for "gw"
+  bool restore_cursor;     ///< restore cursor after yank
 
   linenr_T line_count;     ///< number of lines from op_start to op_end (inclusive)
   bool empty;              ///< op_start and op_end the same (only used by op_change())
@@ -64,6 +65,32 @@ enum {
   CA_COMMAND_BUSY  = 1,  ///< skip restarting edit() once
   CA_NO_ADJ_OP_END = 2,  ///< don't adjust operator end
 };
+
+/// A Visual selection's mode and extent (line/column span, not absolute positions), so it can be
+/// re-applied starting at the cursor: for "gv" reselect (`Visual.resel`) and Visual-operator redo
+/// (`redo_VIsual`).
+typedef struct {
+  int mode;             ///< 'v', 'V', or Ctrl-V
+  linenr_T line_count;  ///< number of lines
+  colnr_T vcol;         ///< number of cols or end column (MAXCOL: to end of line)
+  int count;            ///< count for the Visual operator
+  int arg;              ///< extra argument
+} VisualExtent;
+
+/// Visual/Select mode state, as one global "group" (Visual). Previously these were bare EXTERN
+/// symbols in globals.h; grouped here to make subsystem ownership explicit.
+typedef struct {
+  pos_T start;            ///< Start position of the active Visual selection.
+  bool active;            ///< Whether Visual mode is active.
+  bool select;            ///< Whether Select mode is active.
+  int select_reg;         ///< Register name for Select mode.
+  bool select_exclu_adj;  ///< Cursor was incremented during exclusive selection.
+  int restart_select;     ///< Restart Select mode when next cmd finished.
+  int reselect;           ///< Restart the selection after a Select-mode mapping or menu.
+  int mode;               ///< Type of Visual mode: 'v', 'V', Ctrl-V.
+  bool redo_busy;         ///< True when redoing Visual.
+  VisualExtent resel;     ///< Previous Visual area, for reselection ("gv"); seeds operator-redo.
+} VisualState;
 
 /// Replacement for nchar used by nv_replace().
 enum {

@@ -295,7 +295,7 @@ void *vim_findfile_init(char *path, char *filename, size_t filenamelen, char *st
   // If path is absolute, we do that later.
   if (path[0] == '.'
       && (vim_ispathsep(path[1]) || path[1] == NUL)
-      && (!tagfile || vim_strchr(p_cpo, CPO_DOTTAG) == NULL)
+      && (!tagfile || vim_strchr(p_cpo, kCpoDottag) == NULL)
       && rel_fname != NULL) {
     size_t len = (size_t)(path_tail(rel_fname) - rel_fname);
 
@@ -407,7 +407,9 @@ void *vim_findfile_init(char *path, char *filename, size_t filenamelen, char *st
         ff_expand_buffer.data[ff_expand_buffer.size++] = *wc_part++;
         ff_expand_buffer.data[ff_expand_buffer.size++] = *wc_part++;
 
-        llevel = strtol(wc_part, &errpt, 10);
+        errpt = wc_part;
+        // Use def=255 so that overflow/too-large values keep the "max expand" behavior.
+        llevel = getdigits(&errpt, false, 255);
         if (errpt != wc_part && llevel > 0 && llevel < 255) {
           ff_expand_buffer.data[ff_expand_buffer.size++] = (char)llevel;
         } else if (errpt != wc_part && llevel == 0) {
@@ -1375,7 +1377,7 @@ char *find_file_in_path(char *ptr, size_t len, int options, int first, char *rel
                                   file_to_find, search_ctx);
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 void free_findfile(void)
 {
   API_CLEAR_STRING(ff_expand_buffer);
@@ -1437,7 +1439,7 @@ char *find_file_in_path_option(char *ptr, size_t len, int options, int first, ch
     // copy file name into NameBuff, expanding environment variables
     char save_char = ptr[len];
     ptr[len] = NUL;
-    file_to_findlen = expand_env_esc(ptr, NameBuff, MAXPATHL, false, true, NULL);
+    file_to_findlen = expand_env_esc(ptr, NameBuff, MAXPATHL, NULL, true, NULL);
     ptr[len] = save_char;
 
     xfree(*file_to_find);
@@ -1463,7 +1465,7 @@ char *find_file_in_path_option(char *ptr, size_t len, int options, int first, ch
   if (vim_isAbsName(*file_to_find)
       // "..", "../path", "." and "./path": don't use the path_option
       || rel_to_curdir
-#if defined(MSWIN)
+#ifdef MSWIN
       // handle "\tmp" as absolute path
       || vim_ispathsep((*file_to_find)[0])
       // handle "c:name" as absolute path
@@ -1593,7 +1595,8 @@ theend:
 char *grab_file_name(int count, linenr_T *file_lnum)
 {
   int options = FNAME_MESS | FNAME_EXP | FNAME_REL | FNAME_UNESC;
-  if (VIsual_active) {
+  char *fname;
+  if (Visual.active) {
     size_t len;
     char *ptr;
     if (get_visual_text(NULL, &ptr, &len) == FAIL) {
@@ -1605,9 +1608,12 @@ char *grab_file_name(int count, linenr_T *file_lnum)
 
       *file_lnum = getdigits_int32(&p, false, 0);
     }
-    return find_file_name_in_path(ptr, len, options, count, curbuf->b_ffname);
+    fname = find_file_name_in_path(ptr, len, options, count, curbuf->b_ffname);
+  } else {
+    fname = file_name_at_cursor(options | FNAME_HYP, count, file_lnum);
   }
-  return file_name_at_cursor(options | FNAME_HYP, count, file_lnum);
+  TO_SLASH(fname);
+  return fname;
 }
 
 /// Return the file name under or after the cursor.
@@ -1668,6 +1674,7 @@ char *file_name_in_line(char *line, int col, int options, int count, char *rel_f
 
   // Search forward for the last char of the file name.
   // Also allow ":/" when ':' is not in 'isfname'.
+  // TODO(justinmk): Check for driveletter "x:/" at start, regardless of 'isfname'.
   len = path_has_drive_letter(ptr, strlen(ptr)) ? 2 : 0;
   while (vim_isfilec((uint8_t)ptr[len]) || (ptr[len] == '\\' && ptr[len + 1] == ' ')
          || ((options & FNAME_HYP) && path_is_url(ptr + len))
@@ -1758,6 +1765,13 @@ char *find_file_name_in_path(char *ptr, size_t len, int options, long count, cha
     return NULL;
   }
 
+  if ((options & FNAME_HYP) && len > 6 && strncmp(ptr, "file:/",
+                                                  6) == 0 && !vim_ispathsep(ptr[6])) {
+    size_t off = path_has_drive_letter(ptr + 6, len - 6) ? 6 : 5;
+    ptr += off;
+    len -= off;
+  }
+
   if ((options & FNAME_INCL) && *curbuf->b_p_inex != NUL) {
     tofree = eval_includeexpr(ptr, len);
     if (tofree != NULL) {
@@ -1843,13 +1857,6 @@ void do_autocmd_dirchanged(char *new_dir, CdScope scope, CdCause cause, bool pre
     // Should never happen.
     abort();
   }
-
-#ifdef BACKSLASH_IN_FILENAME
-  char new_dir_buf[MAXPATHL];
-  STRCPY(new_dir_buf, new_dir);
-  slash_adjust(new_dir_buf);
-  new_dir = new_dir_buf;
-#endif
 
   if (pre) {
     tv_dict_add_str(dict, S_LEN("directory"), new_dir);

@@ -1,4 +1,5 @@
 #!/usr/bin/env nvim -l
+---@diagnostic disable: no-unknown
 
 -- Lints C files in the Neovim source tree.
 -- Based on Google "cpplint", modified for Neovim.
@@ -211,7 +212,7 @@ function CppLintState:suppress_errors_from(fname)
     local ok2, data = pcall(vim.json.decode, line)
     if ok2 then
       local fname2, lines, category = data[1], data[2], data[3]
-      local lines_tuple = vim.tbl_islist(lines) and lines or { lines }
+      local lines_tuple = vim.islist(lines) and lines or { lines }
       self.suppressed_errors[fname2][vim.inspect(lines_tuple)][category] = true
     end
   end
@@ -1084,6 +1085,20 @@ local function check_language(filename, clean_lines, linenum, error)
       'runtime/printf',
       4,
       'Use xstrlcpy, xmemcpyz or snprintf instead of strcpy'
+    )
+  end
+
+  -- Check for strtol: it silently overflows/truncates and needs error-prone boilerplate.
+  -- TODO: also flag atoi, atol, atoll, strtoul, strtoll, strtoull.
+  local strtol_regex = vim.regex([[\<strtol\>]])
+  if strtol_regex:match_str(line) then
+    error(
+      filename,
+      linenum,
+      'runtime/deprecated',
+      4,
+      'Use getdigits()/getdigits_int() (or vim_str2nr() for non-decimal bases) instead of strtol, '
+        .. 'which overflows silently. See src/nvim/charset.c.'
     )
   end
 

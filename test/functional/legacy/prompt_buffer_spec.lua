@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local feed = n.feed
 local fn = n.call
 local source = n.source
@@ -11,6 +12,7 @@ local expect = n.expect
 local poke_eventloop = n.poke_eventloop
 local api = n.api
 local eq = t.eq
+local pcall_err = t.pcall_err
 local neq = t.neq
 local exec_lua = n.exec_lua
 
@@ -27,13 +29,11 @@ describe('prompt buffer', function()
     source([[
       func TextEntered(text)
         if a:text == "exit"
-          " Reset &modified to allow the buffer to be closed.
-          set nomodified
           stopinsert
           close
         else
           " Add the output above the current prompt.
-          call append(line("$") - 1, split('Command: "' . a:text . '"', '\n'))
+          call prompt_appendbuf(bufnr(''), split('Command: "' . a:text . '"', '\n'))
           " Reset &modified to allow the buffer to be closed.
           set nomodified
           call timer_start(20, {id -> TimerFunc(a:text)})
@@ -42,7 +42,7 @@ describe('prompt buffer', function()
 
       func TimerFunc(text)
         " Add the output above the current prompt.
-        call append(line("$") - 1, split('Result: "' . a:text .'"', '\n'))
+        call prompt_appendbuf(bufnr(''),  split('Result: "' . a:text .'"', '\n'))
         " Reset &modified to allow the buffer to be closed.
         set nomodified
       endfunc
@@ -62,7 +62,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: ^                    |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -89,6 +89,21 @@ describe('prompt buffer', function()
       {1:~                        }|*8
                                |
     ]])
+
+    command('new')
+    command('set buftype=prompt')
+    feed('iabc<BS><BS>')
+    eq('a', fn('prompt_getinput', fn('bufnr')))
+    command('quit')
+    eq(1, #api.nvim_list_wins())
+
+    command('new')
+    command('set buftype=prompt modified')
+    eq(
+      'Vim(quit):E37: No write since last change (add ! to override)',
+      t.pcall_err(command, 'quit')
+    )
+    eq(2, #api.nvim_list_wins())
   end)
 
   -- oldtest: Test_prompt_editing()
@@ -98,7 +113,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: hel^                 |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -107,7 +122,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: -^hel                |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -116,7 +131,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: -hz^el               |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -125,7 +140,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: -hzelx^              |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -149,7 +164,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd:                     |
       {1:~                        }|*3
-      {2:[Prompt] [+]             }|
+      {2:[Prompt]                 }|
       ^other buffer             |
       {1:~                        }|*3
                                |
@@ -158,7 +173,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: ^                    |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -167,7 +182,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd:^                     |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
                                |
@@ -281,7 +296,7 @@ describe('prompt buffer', function()
       line 2                   |
       line 3^                   |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -403,7 +418,7 @@ describe('prompt buffer', function()
       line 2                   |
       line 3                   |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
                                |
@@ -433,7 +448,7 @@ describe('prompt buffer', function()
       line 2                   |
       line 3^                   |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -450,7 +465,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: tests-middle^-initial|
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
                                |
@@ -460,7 +475,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: tests-mid^le-initial |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
                                |
@@ -471,7 +486,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: tests-mid^dle-initial|
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       1 change; {MATCH:.*} |
@@ -484,7 +499,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: tests-^initial       |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       1 change; {MATCH:.*} |
@@ -509,7 +524,7 @@ describe('prompt buffer', function()
       Command: "tests-initial" |
       cmd:^                     |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       1 line {MATCH:.*} |
@@ -522,7 +537,7 @@ describe('prompt buffer', function()
       Command: "tests-initial" |
       cmd: ^                    |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -533,7 +548,7 @@ describe('prompt buffer', function()
       Command: "tests-initial" |
       ^cmd: hello               |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       1 change; {MATCH:.*} |
@@ -548,7 +563,7 @@ describe('prompt buffer', function()
       Command: "tests-initial" |
       c^md > hello              |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       Already at oldest change |
@@ -563,7 +578,7 @@ describe('prompt buffer', function()
       Command: "tests-initial" |
       cmd > hello there        |
       cmd >^                    |
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       Already at oldest change |
@@ -580,7 +595,7 @@ describe('prompt buffer', function()
       line 2                   |
       line 3^                   |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -592,7 +607,7 @@ describe('prompt buffer', function()
       line 2                   |
       after^                    |
       line 3                   |
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -608,7 +623,7 @@ describe('prompt buffer', function()
       before^                   |
       line 2                   |
       after                    |
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -618,6 +633,8 @@ describe('prompt buffer', function()
     eq('line 1\nbefore\nline 2\nafter\nline 3', fn('prompt_getinput', buf))
 
     feed('<cr>')
+    vim.uv.sleep(20)
+    eq('', fn('prompt_getinput', buf))
     screen:expect([[
       line 2                   |
       after                    |
@@ -630,6 +647,16 @@ describe('prompt buffer', function()
     ]])
 
     feed('line 4<s-cr>line 5')
+    screen:expect([[
+      after                    |
+      line 3"                  |
+      cmd: line 4              |
+      line 5^                   |
+      {3:[Prompt]                 }|
+      other buffer             |
+      {1:~                        }|*3
+      {5:-- INSERT --}             |
+    ]])
 
     feed('<esc>k0oafter prompt')
     screen:expect([[
@@ -637,7 +664,7 @@ describe('prompt buffer', function()
       line 3"                  |
       cmd: line 4              |
       after prompt^             |
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -649,13 +676,15 @@ describe('prompt buffer', function()
       line 3"                  |
       cmd: at prompt^           |
       line 4                   |
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
     ]])
 
     feed('<cr>')
+    vim.uv.sleep(20)
+    eq('', fn('prompt_getinput', buf))
     screen:expect([[
       line 4                   |
       after prompt             |
@@ -674,7 +703,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: asdf^                |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -684,7 +713,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: ^                    |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -694,7 +723,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: asdf^                |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -704,7 +733,7 @@ describe('prompt buffer', function()
     screen:expect([[
       cmd: ^                    |
       {1:~                        }|*3
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       other buffer             |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -1021,7 +1050,7 @@ describe('prompt buffer', function()
       ooooooooooooooooooooong >|
        ^                        |
       {1:~                        }|
-      {3:[Prompt] [+]             }|
+      {3:[Prompt]                 }|
       foo > hello              |
       {1:~                        }|*3
       {5:-- INSERT --}             |
@@ -1044,5 +1073,83 @@ describe('prompt buffer', function()
     api.nvim_set_option_value('buftype', 'prompt', { buf = unloaded_buf })
     fn('prompt_setprompt', unloaded_buf, 'hello unloaded! > ')
     eq('hello unloaded! > ', fn('prompt_getprompt', unloaded_buf))
+  end)
+
+  it('prompt_appendbuf with multi-element list and singleline prompt', function()
+    command('new')
+    local buf = api.nvim_get_current_buf()
+    api.nvim_set_option_value('buftype', 'prompt', { buf = buf })
+    fn('prompt_setprompt', buf, 'cmd: ')
+
+    -- Single element list: appends before prompt
+    fn('prompt_appendbuf', buf, { 'line1' })
+    eq({ 'line1', 'cmd: ' }, api.nvim_buf_get_lines(buf, 0, -1, false))
+
+    -- Multi-element list: first element appended, rest inserted as new lines before prompt
+    fn('prompt_appendbuf', buf, { '-append', 'line2' })
+    eq({ 'line1-append', 'line2', 'cmd: ' }, api.nvim_buf_get_lines(buf, 0, -1, false))
+
+    -- Multi-element list after multi-element list
+    fn('prompt_appendbuf', buf, { '', 'line3', 'line4', 'line5', 'line6' })
+    eq(
+      { 'line1-append', 'line2', 'line3', 'line4', 'line5', 'line6', 'cmd: ' },
+      api.nvim_buf_get_lines(buf, 0, -1, false)
+    )
+  end)
+
+  it('prompt_appendbuf with multi-element list and multiline prompt', function()
+    command('new')
+    local buf = api.nvim_get_current_buf()
+    api.nvim_set_option_value('buftype', 'prompt', { buf = buf })
+    fn('prompt_setprompt', buf, 'cmd: ')
+    source('startinsert')
+
+    -- User types multiline input in the prompt
+    feed('input1<s-cr>input2')
+    eq({ 'cmd: input1', 'input2' }, api.nvim_buf_get_lines(buf, 0, -1, false))
+
+    -- Single element list: appends before prompt
+    fn('prompt_appendbuf', buf, { 'line1' })
+    eq({ 'line1', 'cmd: input1', 'input2' }, api.nvim_buf_get_lines(buf, 0, -1, false))
+
+    -- Multi-element list: first element appended, rest inserted as new lines before prompt
+    fn('prompt_appendbuf', buf, { '-append', 'line2' })
+    eq(
+      { 'line1-append', 'line2', 'cmd: input1', 'input2' },
+      api.nvim_buf_get_lines(buf, 0, -1, false)
+    )
+
+    -- Multi-element list after multi-element list
+    fn('prompt_appendbuf', buf, { '', 'line3', 'line4', 'line5', 'line6' })
+    eq(
+      { 'line1-append', 'line2', 'line3', 'line4', 'line5', 'line6', 'cmd: input1', 'input2' },
+      api.nvim_buf_get_lines(buf, 0, -1, false)
+    )
+  end)
+
+  it("respects 'scrollback'", function()
+    exec_lua(function()
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_set_option_value('buftype', 'prompt', { buf = buf })
+      vim.api.nvim_set_option_value('scrollback', 3, { buf = buf })
+      vim.fn.prompt_setcallback(buf, function(_)
+        vim.fn.prompt_setprompt(buf, '> ')
+      end)
+      vim.fn.prompt_setprompt(buf, '> ')
+      vim.api.nvim_set_current_buf(buf)
+      vim.cmd('startinsert')
+    end)
+    local buf = fn('bufnr')
+
+    -- Submit 5 times, each creates a new prompt line as history
+    feed('a<cr>')
+    feed('b<cr>')
+    feed('c<cr>')
+    feed('d<cr>')
+    feed('e<cr>')
+
+    -- Should only keep 3 lines above the prompt (scrollback limit = 3)
+    local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+    eq({ '> c', '> d', '> e', '> ' }, lines)
   end)
 end)

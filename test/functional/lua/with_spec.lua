@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, pending = t.describe, t.it, t.before_each, t.pending
 local fn = n.fn
 local api = n.api
 local command = n.command
@@ -267,6 +268,12 @@ describe('vim._with', function()
         -- Current
         assert_buf(api.nvim_get_current_buf())
 
+        local buf = api.nvim_get_current_buf()
+        vim._with({ buf = 0 }, function()
+          assert(api.nvim_get_current_buf() == buf)
+        end)
+        assert(api.nvim_get_current_buf() == buf)
+
         -- Hidden listed
         local listed = api.nvim_create_buf(true, true)
         assert_buf(listed)
@@ -339,13 +346,50 @@ describe('vim._with', function()
     end)
   end)
 
+  describe('`cwd` context', function()
+    it('works', function()
+      local out = exec_lua [[
+        local cwd = vim.uv.cwd()
+        local temp_cwd = vim.fs.joinpath(cwd, 'test')
+        local test_cwd
+        vim._with({ cwd = temp_cwd }, function() test_cwd = vim.uv.cwd() end)
+        -- Use `fs_realpath` to resolve symlinks from how tests are set up
+        return { vim.uv.cwd() == cwd, vim.uv.fs_realpath(test_cwd) == vim.uv.fs_realpath(temp_cwd) }
+      ]]
+      eq({ true, true }, out)
+    end)
+
+    it('can be nested', function()
+      local out = exec_lua [[
+        local cwd = vim.uv.cwd()
+        local temp_cwd = vim.fs.joinpath(cwd, 'test')
+        local temp_cwd2 = vim.fs.joinpath(cwd, 'src')
+        local test_cwd_before, test_cwd, test_cwd_after
+        vim._with({ cwd = temp_cwd }, function()
+          test_cwd_before = vim.uv.cwd()
+          vim._with({ cwd = temp_cwd2 }, function()
+            test_cwd = vim.uv.cwd()
+          end)
+          test_cwd_after = vim.uv.cwd()
+        end)
+        return {
+          vim.uv.cwd() == cwd,
+          vim.uv.fs_realpath(test_cwd_before) == vim.uv.fs_realpath(temp_cwd),
+          vim.uv.fs_realpath(test_cwd) == vim.uv.fs_realpath(temp_cwd2),
+          vim.uv.fs_realpath(test_cwd_after) == vim.uv.fs_realpath(temp_cwd),
+        }
+      ]]
+      eq({ true, true, true, true }, out)
+    end)
+  end)
+
   describe('`emsg_silent` context', function()
     pending('works', function()
       local ok = pcall(
         exec_lua,
         [[
           _G.f = function()
-            error('This error should not interfer with execution', 0)
+            error('This error should not interfere with execution', 0)
           end
           -- Should not produce error same as `vim.cmd('silent! lua _G.f()')`
           vim._with({ emsg_silent = true }, f)
@@ -926,7 +970,7 @@ describe('vim._with', function()
         wo = { ve_cur = 'insert', ve_other = 'block', winbl_cur = 25, winbl_other = 10 },
         -- Global `winbl` inside context ideally should be untouched and equal
         -- to 50. It seems to be equal to 0 because `context.buf` uses
-        -- `aucmd_prepbuf` C approach which has no guarantees about window or
+        -- `ctx_switch` C approach which has no guarantees about window or
         -- window option values inside context.
         go = { cms = '-- %s', ul = 0, ve = 'none', winbl = 0, lmap = 'xy,yx', cf = false },
       }, out.inner)
@@ -1067,14 +1111,10 @@ describe('vim._with', function()
       eq('', exec_capture('messages'))
 
       local screen = Screen.new(20, 5)
-      screen:set_default_attr_ids {
-        [1] = { bold = true, reverse = true },
-        [2] = { bold = true, foreground = Screen.colors.Blue },
-      }
       exec_lua [[ vim._with({ silent = true }, function() vim.cmd.echo('"ccc"') end) ]]
       screen:expect [[
         ^                    |
-        {2:~                   }|*3
+        {1:~                   }|*3
                             |
       ]]
     end)
@@ -1161,6 +1201,14 @@ describe('vim._with', function()
         -- Current
         assert_win(api.nvim_get_current_win())
 
+        local win = api.nvim_get_current_win()
+        vim._with({ win = 0 }, function()
+          assert(api.nvim_get_current_win() == win)
+          -- Should restore context window if that changed
+          vim.cmd.tabnew()
+        end)
+        assert(api.nvim_get_current_win() == win)
+
         -- Not visible
         local other_win, cur_win = setup_windows()
         vim.cmd.tabnew()
@@ -1215,10 +1263,6 @@ describe('vim._with', function()
 
     it('updates ruler if cursor moved', function()
       local screen = Screen.new(30, 5)
-      screen:set_default_attr_ids {
-        [1] = { reverse = true },
-        [2] = { bold = true, reverse = true },
-      }
       exec_lua [[
         vim.opt.ruler = true
         local lines = {}
@@ -1231,9 +1275,9 @@ describe('vim._with', function()
       ]]
       screen:expect [[
         19                            |
-        {1:< Name] [+] 20,1            3%}|
-        ^19                            |
         {2:< Name] [+] 20,1            3%}|
+        ^19                            |
+        {3:< Name] [+] 20,1            3%}|
                                       |
       ]]
       exec_lua [[
@@ -1242,9 +1286,9 @@ describe('vim._with', function()
       ]]
       screen:expect [[
         99                            |
-        {1:< Name] [+] 100,1          19%}|
+        {2:< Name] [+] 100,1          19%}|
         ^19                            |
-        {2:< Name] [+] 20,1            3%}|
+        {3:< Name] [+] 20,1            3%}|
                                       |
       ]]
     end)

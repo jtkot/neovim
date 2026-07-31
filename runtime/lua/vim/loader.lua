@@ -174,13 +174,21 @@ local function read_cachefile(cname)
 
   --- @type integer[]|{[0]:integer}
   local header = vim.split(data:sub(1, zero - 1), ',')
-  if tonumber(header[1]) ~= VERSION then
+  local version = vim._tointeger(header[1])
+  if version ~= VERSION then
+    return
+  end
+
+  local size = vim._tointeger(header[2])
+  local sec = vim._tointeger(header[3])
+  local nsec = vim._tointeger(header[4])
+  if not (size and sec and nsec) then
     return
   end
 
   local hash = {
-    size = tonumber(header[2]),
-    mtime = { sec = tonumber(header[3]), nsec = tonumber(header[4]) },
+    size = size,
+    mtime = { sec = sec, nsec = nsec },
   }
 
   local chunk = data:sub(zero + 1)
@@ -453,12 +461,6 @@ function M.enable(enable)
   end
 end
 
---- @deprecated
-function M.disable()
-  vim.deprecate('vim.loader.disable', 'vim.loader.enable(false)', '0.12')
-  vim.loader.enable(false)
-end
-
 --- Tracks the time spent in a function
 --- @generic F: function
 --- @param f F
@@ -525,7 +527,7 @@ function M._inspect(opts)
         end
       end
     end
-    vim.api.nvim_echo(chunks, true, {})
+    vim.api.nvim_echo(chunks, true)
   end
   return stats
 end

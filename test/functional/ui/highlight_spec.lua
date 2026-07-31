@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local os = require('os')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local clear, feed, insert = n.clear, n.feed, n.insert
 local command, exec = n.command, n.exec
 local eval = n.eval
@@ -1520,6 +1521,100 @@ describe('CursorColumn highlight', function()
       {100:line 2  ^                                          }|
       line 3  {30: }                                         |
       {1:~                                                 }|*4
+                                                        |
+    ]])
+  end)
+
+  it('is updated with completion active #39153', function()
+    command('set autocomplete cursorcolumn')
+    feed('iasdf<CR>')
+    screen:expect([[
+      {21:a}sdf                                              |
+      ^                                                  |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('a')
+    screen:expect([[
+      a{21:s}df                                              |
+      a^                                                 |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('s')
+    screen:expect([[
+      as{21:d}f                                              |
+      as^                                                |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('d')
+    screen:expect([[
+      asd{21:f}                                              |
+      asd^                                               |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('f')
+    screen:expect([[
+      asdf{21: }                                             |
+      asdf^                                              |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('g')
+    screen:expect([[
+      asdf {21: }                                            |
+      asdfg^                                             |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed(' ')
+    screen:expect([[
+      asdf  {21: }                                           |
+      asdfg ^                                            |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<BS>')
+    screen:expect([[
+      asdf {21: }                                            |
+      asdfg^                                             |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<BS>')
+    screen:expect([[
+      asdf{21: }                                             |
+      asdf^                                              |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<BS>')
+    screen:expect([[
+      asd{21:f}                                              |
+      asd^                                               |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('h')
+    screen:expect([[
+      asdf{21: }                                             |
+      asdh^                                              |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<Esc>')
+    screen:expect([[
+      asd{21:f}                                              |
+      asd^h                                              |
+      {1:~                                                 }|*5
                                                         |
     ]])
   end)

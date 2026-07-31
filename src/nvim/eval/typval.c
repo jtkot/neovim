@@ -869,6 +869,12 @@ void tv_list_extend(list_T *const l1, list_T *const l2, listitem_T *const bef)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   int todo = tv_list_len(l2);
+
+  // NULL list is equivalent to an empty list: nothing to do.
+  if (todo == 0) {
+    return;
+  }
+
   listitem_T *const befbef = (bef == NULL ? NULL : bef->li_prev);
   listitem_T *const saved_next = (befbef == NULL ? NULL : befbef->li_next);
   // We also quit the loop when we have inserted the original item count of
@@ -918,7 +924,7 @@ static list_T *tv_list_slice(list_T *ol, varnumber_T n1, varnumber_T n2)
   listitem_T *item = tv_list_find(ol, (int)n1);
   for (; n1 <= n2; n1++) {
     tv_list_append_tv(l, TV_LIST_ITEM_TV(item));
-    item = TV_LIST_ITEM_NEXT(rettv->vval.v_list, item);
+    item = TV_LIST_ITEM_NEXT(ol, item);
   }
   return l;
 }
@@ -2488,11 +2494,14 @@ int tv_dict_add_list(dict_T *const d, const char *const key, const size_t key_le
 
   item->di_tv.v_type = VAR_LIST;
   item->di_tv.vval.v_list = list;
-  tv_list_ref(list);
   if (tv_dict_add(d, item) == FAIL) {
+    // Detach "list" so tv_dict_item_free() does not unref it: on failure
+    // ownership stays with the caller.
+    item->di_tv.vval.v_list = NULL;
     tv_dict_item_free(item);
     return FAIL;
   }
+  tv_list_ref(list);
   return OK;
 }
 
@@ -2531,11 +2540,14 @@ int tv_dict_add_dict(dict_T *const d, const char *const key, const size_t key_le
 
   item->di_tv.v_type = VAR_DICT;
   item->di_tv.vval.v_dict = dict;
-  dict->dv_refcount++;
   if (tv_dict_add(d, item) == FAIL) {
+    // Detach "dict" so tv_dict_item_free() does not unref it: on failure
+    // ownership stays with the caller.
+    item->di_tv.vval.v_dict = NULL;
     tv_dict_item_free(item);
     return FAIL;
   }
+  dict->dv_refcount++;
   return OK;
 }
 
@@ -2678,11 +2690,12 @@ int tv_dict_add_func(dict_T *const d, const char *const key, const size_t key_le
 
   item->di_tv.v_type = VAR_FUNC;
   item->di_tv.vval.v_string = xmemdupz(fp->uf_name, fp->uf_namelen);
+  // Reference before tv_dict_add() so tv_dict_item_free()'s unref stays balanced on failure.
+  func_ref(item->di_tv.vval.v_string);
   if (tv_dict_add(d, item) == FAIL) {
     tv_dict_item_free(item);
     return FAIL;
   }
-  func_ref(item->di_tv.vval.v_string);
   return OK;
 }
 

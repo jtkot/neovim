@@ -10,9 +10,9 @@
 #include "nvim/buffer.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/change.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/eval.h"
 #include "nvim/eval/buffer.h"
 #include "nvim/eval/funcs.h"
@@ -22,6 +22,7 @@
 #include "nvim/ex_cmds.h"
 #include "nvim/extmark.h"
 #include "nvim/globals.h"
+#include "nvim/insert.h"
 #include "nvim/macros_defs.h"
 #include "nvim/memline.h"
 #include "nvim/memory.h"
@@ -36,7 +37,7 @@
 
 typedef struct {
   win_T *cob_curwin_save;
-  aco_save_T cob_aco;
+  CtxSwitch cob_aco;
   int cob_using_aco;
   int cob_save_VIsual_active;
 } cob_T;
@@ -95,8 +96,8 @@ static void change_other_buffer_prepare(cob_T *cob, buf_T *buf)
 
   // Set "curbuf" to the buffer being changed.  Then make sure there is a
   // window for it to handle any side effects.
-  cob->cob_save_VIsual_active = VIsual_active;
-  VIsual_active = false;
+  cob->cob_save_VIsual_active = Visual.active;
+  Visual.active = false;
   cob->cob_curwin_save = curwin;
   curbuf = buf;
   find_win_for_curbuf();  // simplest: find existing window for "buf"
@@ -105,7 +106,7 @@ static void change_other_buffer_prepare(cob_T *cob, buf_T *buf)
     // No existing window for this buffer.  It is dangerous to have
     // curwin->w_buffer differ from "curbuf", use the autocmd window.
     curbuf = curwin->w_buffer;
-    aucmd_prepbuf(&cob->cob_aco, buf);
+    ctx_switch(&cob->cob_aco, NULL, NULL, buf, 0);
     cob->cob_using_aco = true;
   }
 }
@@ -113,12 +114,12 @@ static void change_other_buffer_prepare(cob_T *cob, buf_T *buf)
 static void change_other_buffer_restore(cob_T *cob)
 {
   if (cob->cob_using_aco) {
-    aucmd_restbuf(&cob->cob_aco);
+    ctx_restore(&cob->cob_aco);
   } else {
     curwin = cob->cob_curwin_save;
     curbuf = curwin->w_buffer;
   }
-  VIsual_active = cob->cob_save_VIsual_active;
+  Visual.active = cob->cob_save_VIsual_active;
 }
 
 /// Set line or list of lines in buffer "buf" to "lines".
@@ -272,6 +273,92 @@ static void buf_set_append_line(typval_T *argvars, typval_T *rettv, bool append)
 void f_appendbufline(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
   buf_set_append_line(argvars, rettv, true);
+}
+
+/// "prompt_appendbuf({buffer}, string/list)" function
+void f_prompt_appendbuf(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
+  FUNC_ATTR_NONNULL_ALL
+{
+  const int did_emsg_before = did_emsg;
+
+  // Return an 1 by default, e.g. append failed or not a prompt buffer
+  rettv->v_type = VAR_NUMBER;
+  rettv->vval.v_number = 1;
+
+  buf_T *const buf = tv_get_buf_from_arg(&argvars[0]);
+  if (buf == NULL || !bt_prompt(buf)) {
+    return;
+  }
+
+  linenr_T lnum = MAX(0, buf->b_prompt_start.mark.lnum - 1);
+  typval_T *lines = &argvars[1];
+  bool did_concat = false;
+
+  if (!buf->b_prompt_append_new_line) {
+    // Since we are not creating a new line we need to append input to current line
+    const char *text = (lnum > 0) ? (const char *)ml_get_buf(buf, lnum) : "";
+    if (lines->v_type == VAR_LIST) {
+      list_T *l = lines->vval.v_list;
+      if (l != NULL && tv_list_len(l) > 0) {
+        listitem_T *li = tv_list_first(l);
+        const char *str = tv_get_string(&li->li_tv);
+        char *new_str = concat_str(text, str);
+        tv_clear(&li->li_tv);
+        li->li_tv.v_type = VAR_STRING;
+        li->li_tv.vval.v_string = new_str;
+        did_concat = true;
+      }
+    } else if (lines->v_type == VAR_STRING) {
+      const char *str = tv_get_string(lines);
+      char *new_str = concat_str(text, str);
+      tv_clear(lines);
+      lines->v_type = VAR_STRING;
+      lines->vval.v_string = new_str;
+    }
+  }
+
+  if (did_emsg == did_emsg_before) {
+    if (did_concat && tv_list_len(lines->vval.v_list) > 1) {
+      // Multi-element list with concat: first element (already concatenated)
+      // replaces the line at lnum, remaining elements are inserted after.
+      list_T *l = lines->vval.v_list;
+      listitem_T *li = tv_list_first(l);
+      set_buffer_lines(buf, lnum, false, &li->li_tv, rettv);
+
+      if (rettv->vval.v_number == 0) {
+        tv_list_item_remove(l, li);
+        set_buffer_lines(buf, lnum, true, lines, rettv);
+      }
+    } else {
+      set_buffer_lines(buf, lnum, buf->b_prompt_append_new_line, lines, rettv);
+    }
+  }
+
+  if (rettv->vval.v_number == 0) {
+    // Ok we've inserted the lines successfully now check if last string ended with '\n'
+    // to determine if we need to insert a new line before next append
+    buf->b_prompt_append_new_line = false;
+    if (lines->v_type == VAR_LIST) {
+      list_T *l = lines->vval.v_list;
+      if (l != NULL && tv_list_len(l) > 0) {
+        listitem_T *li = tv_list_last(l);
+        const char *str = tv_get_string(&li->li_tv);
+        size_t len = strlen(str);
+        if (len > 0 && str[len - 1] == '\n') {
+          buf->b_prompt_append_new_line = true;
+        }
+      }
+    } else if (lines->v_type == VAR_STRING) {
+      const char *str = tv_get_string(lines);
+      size_t len = strlen(str);
+
+      if (len > 0 && str[len - 1] == '\n') {
+        buf->b_prompt_append_new_line = true;
+      }
+    }
+
+    prompt_trim_scrollback(buf);
+  }
 }
 
 /// "bufadd(expr)" function
@@ -498,7 +585,7 @@ static dict_T *get_buffer_info(buf_T *buf)
   tv_dict_add_nr(dict, S_LEN("changed"), bufIsChanged(buf));
   tv_dict_add_nr(dict, S_LEN("changedtick"), buf_get_changedtick(buf));
   tv_dict_add_nr(dict, S_LEN("hidden"), buf->b_ml.ml_mfp != NULL && buf->b_nwindows == 0);
-  tv_dict_add_nr(dict, S_LEN("command"), buf == cmdwin_buf);
+  tv_dict_add_nr(dict, S_LEN("command"), bt_cmdwin(buf));
 
   // Get a reference to buffer variables
   tv_dict_add_dict(dict, S_LEN("variables"), buf->b_vars);
@@ -628,15 +715,19 @@ static void get_buffer_lines(buf_T *buf, linenr_T start, linenr_T end, bool retl
 ///                 false: "getbufoneline()" function
 static void getbufline(typval_T *argvars, typval_T *rettv, bool retlist)
 {
+  linenr_T lnum = 1;
+  linenr_T end = 1;
   const int did_emsg_before = did_emsg;
   buf_T *const buf = tv_get_buf_from_arg(&argvars[0]);
-  const linenr_T lnum = tv_get_lnum_buf(&argvars[1], buf);
-  if (did_emsg > did_emsg_before) {
-    return;
+  if (buf != NULL) {
+    lnum = tv_get_lnum_buf(&argvars[1], buf);
+    if (did_emsg > did_emsg_before) {
+      return;
+    }
+    end = (argvars[2].v_type == VAR_UNKNOWN
+           ? lnum
+           : tv_get_lnum_buf(&argvars[2], buf));
   }
-  const linenr_T end = (argvars[2].v_type == VAR_UNKNOWN
-                        ? lnum
-                        : tv_get_lnum_buf(&argvars[2], buf));
 
   get_buffer_lines(buf, lnum, end, retlist, rettv);
 }
@@ -687,33 +778,6 @@ void f_setline(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   }
 }
 
-/// Make "buf" the current buffer.
-///
-/// restore_buffer() MUST be called to undo.
-/// No autocommands will be executed. Use aucmd_prepbuf() if there are any.
-void switch_buffer(bufref_T *save_curbuf, buf_T *buf)
-{
-  block_autocmds();
-  set_bufref(save_curbuf, curbuf);
-  curbuf->b_nwindows--;
-  curbuf = buf;
-  curwin->w_buffer = buf;
-  curbuf->b_nwindows++;
-}
-
-/// Restore the current buffer after using switch_buffer().
-void restore_buffer(bufref_T *save_curbuf)
-{
-  unblock_autocmds();
-  // Check for valid buffer, just in case.
-  if (bufref_valid(save_curbuf)) {
-    curbuf->b_nwindows--;
-    curwin->w_buffer = save_curbuf->br_buf;
-    curbuf = save_curbuf->br_buf;
-    curbuf->b_nwindows++;
-  }
-}
-
 /// "prompt_setcallback({buffer}, {callback})" function
 void f_prompt_setcallback(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
@@ -727,10 +791,8 @@ void f_prompt_setcallback(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
     return;
   }
 
-  if (argvars[1].v_type != VAR_STRING || *argvars[1].vval.v_string != NUL) {
-    if (!callback_from_typval(&prompt_callback, &argvars[1])) {
-      return;
-    }
+  if (!callback_from_typval(&prompt_callback, &argvars[1])) {
+    return;
   }
 
   callback_free(&buf->b_prompt_callback);
@@ -750,10 +812,8 @@ void f_prompt_setinterrupt(typval_T *argvars, typval_T *rettv, EvalFuncData fptr
     return;
   }
 
-  if (argvars[1].v_type != VAR_STRING || *argvars[1].vval.v_string != NUL) {
-    if (!callback_from_typval(&interrupt_callback, &argvars[1])) {
-      return;
-    }
+  if (!callback_from_typval(&interrupt_callback, &argvars[1])) {
+    return;
   }
 
   callback_free(&buf->b_prompt_interrupt);
@@ -778,8 +838,12 @@ void f_prompt_setprompt(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   // even while user is editing their input.
   if (bt_prompt(buf) && buf->b_ml.ml_mfp != NULL) {
     // In case the mark is set to a nonexistent line.
-    buf->b_prompt_start.mark.lnum = MAX(1, MIN(buf->b_prompt_start.mark.lnum,
-                                               buf->b_ml.ml_line_count));
+    if (buf->b_prompt_start.mark.lnum < 1
+        || buf->b_prompt_start.mark.lnum > curbuf->b_ml.ml_line_count) {
+      buf->b_prompt_start.mark.lnum = MAX(1, MIN(buf->b_prompt_start.mark.lnum,
+                                                 buf->b_ml.ml_line_count));
+      curbuf->b_prompt_append_new_line = true;
+    }
 
     linenr_T prompt_lno = buf->b_prompt_start.mark.lnum;
     char *old_prompt = buf_prompt_text(buf);

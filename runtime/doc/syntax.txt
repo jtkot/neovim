@@ -234,6 +234,7 @@ SpecialComment	special things inside a comment
 Debug		debugging statements
 
 Underlined	text that stands out, HTML links
+Dimmed		text that is de-emphasized
 
 Ignore		left blank, hidden  |hl-Ignore|
 
@@ -368,6 +369,19 @@ abel_cpp_comments_illegal	do not interpret '//' as inline comment leader
 ADA
 
 See |ft-ada-syntax|
+
+
+ALGOL 68					*algol68* *ft-algol68-syntax*
+
+This syntax file currently targets the Algol 68 Genie project using the
+default UPPER stropping regime.  It should also be usable in other
+environments using the UPPER stropping regime, though somewhat less complete.
+
+Highlighting can be further configured with the following variables.
+
+Variable			Highlight ~
+*algol68_no_preludes*		no prelude identifiers, procedures or
+				operators
 
 
 ANT							*ft-ant-syntax*
@@ -762,6 +776,8 @@ cpp_no_cpp11		don't highlight C++11 standard items
 cpp_no_cpp14		don't highlight C++14 standard items
 cpp_no_cpp17		don't highlight C++17 standard items
 cpp_no_cpp20		don't highlight C++20 standard items
+cpp_no_cpp23		don't highlight C++23 standard items
+cpp_no_cpp26		don't highlight C++26 standard items
 
 
 CSH							*ft-csh-syntax*
@@ -1795,11 +1811,11 @@ cycles for such a feature to become either integrated into the platform or
 withdrawn from this effort.  To cater for early adopters, there is optional
 support in Vim for syntax related preview features that are implemented.  You
 can request it by specifying a list of preview feature numbers as follows: >
-	:let g:java_syntax_previews = [507]
+	:let g:java_syntax_previews = [530]
 
 The supported JEP numbers are to be drawn from this table:
 	`430`: String Templates [JDK 21]
-	`507`: Primitive types in Patterns, instanceof, and switch
+	`530`: Primitive types in Patterns, instanceof, and switch
 
 Note that as soon as the particular preview feature will have been integrated
 into the Java platform, its entry will be removed from the table and related
@@ -5376,7 +5392,7 @@ NormalFloat	Normal text in floating windows.
 FloatBorder	Border of floating windows.
 							*hl-FloatShadow*
 FloatShadow	Blended areas when border is "shadow".
-							*hl-FLoatShadowThrough*
+							*hl-FloatShadowThrough*
 FloatShadowThrough
 		Shadow corners when border is "shadow".
 							*hl-FloatTitle*
@@ -5462,11 +5478,11 @@ StatusLineTerm	Status line of |terminal| window.
 StatusLineTermNC
 		Status line of non-current |terminal| windows.
 							*hl-TabLine*
-TabLine		Tab pages line, not active tab page label.
+TabLine		Tabpages line, not active tabpage label.
 							*hl-TabLineFill*
-TabLineFill	Tab pages line, where there are no labels.
+TabLineFill	Tabpages line, where there are no labels.
 							*hl-TabLineSel*
-TabLineSel	Tab pages line, active tab page label.
+TabLineSel	Tabpages line, active tabpage label.
 							*hl-Title*
 Title		Titles for output from ":set all", ":autocmd" etc.
 							*hl-Visual*

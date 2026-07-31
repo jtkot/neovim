@@ -41,34 +41,34 @@ local function starsetf(ft, priority)
 end
 
 --- Get a line range from the buffer.
----@param bufnr integer The buffer to get the lines from
+---@param buf integer The buffer to get the lines from
 ---@param start_lnum integer|nil The line number of the first line (inclusive, 1-based)
 ---@param end_lnum integer|nil The line number of the last line (inclusive, 1-based)
 ---@return string[] # Array of lines
-function M._getlines(bufnr, start_lnum, end_lnum)
-  if not bufnr or bufnr < 0 then
+function M._getlines(buf, start_lnum, end_lnum)
+  if not buf or buf < 0 then
     return {}
   end
 
   if start_lnum then
-    return api.nvim_buf_get_lines(bufnr, start_lnum - 1, end_lnum or start_lnum, false)
+    return api.nvim_buf_get_lines(buf, start_lnum - 1, end_lnum or start_lnum, false)
   end
 
   -- Return all lines
-  return api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  return api.nvim_buf_get_lines(buf, 0, -1, false)
 end
 
 --- Get a single line from the buffer.
----@param bufnr integer The buffer to get the lines from
+---@param buf integer The buffer to get the lines from
 ---@param start_lnum integer The line number of the first line (inclusive, 1-based)
 ---@return string
-function M._getline(bufnr, start_lnum)
-  if not bufnr or bufnr < 0 then
+function M._getline(buf, start_lnum)
+  if not buf or buf < 0 then
     return ''
   end
 
   -- Return a single line
-  return api.nvim_buf_get_lines(bufnr, start_lnum - 1, start_lnum, false)[1] or ''
+  return api.nvim_buf_get_lines(buf, start_lnum - 1, start_lnum, false)[1] or ''
 end
 
 --- Check whether a string matches any of the given Lua patterns.
@@ -90,16 +90,52 @@ end
 
 --- Get the next non-whitespace line in the buffer.
 ---
----@param bufnr integer The buffer to get the line from
+---@param buf integer The buffer to get the line from
 ---@param start_lnum integer The line number of the first line to start from (inclusive, 1-based)
----@return string|nil The first non-blank line if found or `nil` otherwise
-function M._nextnonblank(bufnr, start_lnum)
-  for _, line in ipairs(M._getlines(bufnr, start_lnum, -1)) do
+---@return string|nil line The first non-blank line if found or `nil` otherwise
+---@return integer|nil lnum The line number of the first non-blank line or `nil`
+function M._nextnonblank(buf, start_lnum)
+  for off, line in ipairs(M._getlines(buf, start_lnum, -1)) do
     if not line:find('^%s*$') then
-      return line
+      return line, start_lnum + off - 1
     end
   end
-  return nil
+  return nil, nil
+end
+
+--- Gets a best-effort set of all "known" filetypes, discovered by:
+--- - `getcompletion()`
+--- - `vim.filetype` internal registry
+--- @return table<string,true>
+function M._get_known_filetypes()
+  local known = {} --- @type table<string,true>
+  for _, ft in ipairs(vim.fn.getcompletion('', 'filetype')) do
+    known[ft] = true
+  end
+  local registry = vim.filetype.inspect()
+
+  local function add_filetype(value)
+    local filetype = type(value) == 'table' and value[1] or value
+    if type(filetype) == 'string' then
+      known[filetype] = true
+    end
+  end
+
+  for _, value in pairs(registry.extension) do
+    add_filetype(value)
+  end
+
+  for _, value in pairs(registry.filename) do
+    add_filetype(value)
+  end
+
+  for _, mappings in pairs(registry.pattern) do
+    for _, value in pairs(mappings) do
+      add_filetype(value)
+    end
+  end
+
+  return known
 end
 
 do
@@ -209,6 +245,7 @@ local extension = {
   adb = 'ada',
   tdf = 'ahdl',
   aidl = 'aidl',
+  a68 = 'algol68',
   aml = 'aml',
   run = 'ampl',
   g4 = 'antlr4',
@@ -232,14 +269,13 @@ local extension = {
   a = detect.asm,
   A = detect.asm,
   lst = detect.asm,
-  mac = detect.asm,
   asn1 = 'asn',
   asn = 'asn',
   asp = detect.asp,
   astro = 'astro',
   asy = 'asy',
   atl = 'atlas',
-  as = 'atlas',
+  as = detect.as,
   zed = 'authzed',
   ahk = 'autohotkey',
   au3 = 'autoit',
@@ -255,6 +291,7 @@ local extension = {
   bm = detect.bas,
   bc = 'bc',
   bdf = 'bdf',
+  bean = 'beancount',
   beancount = 'beancount',
   bib = 'bib',
   com = detect_seq(detect.bindzone, 'dcl'),
@@ -329,6 +366,7 @@ local extension = {
   cbl = 'cobol',
   atg = 'coco',
   recipe = 'conaryrecipe',
+  cto = 'concerto',
   ctags = 'conf',
   hook = function(_path, bufnr)
     return M._getline(bufnr, 1) == '[Trigger]' and 'confini' or nil
@@ -406,6 +444,8 @@ local extension = {
   rej = 'diff',
   dj = 'djot',
   djot = 'djot',
+  Containerfile = 'dockerfile',
+  containerfile = 'dockerfile',
   Dockerfile = 'dockerfile',
   dockerfile = 'dockerfile',
   bat = 'dosbatch',
@@ -529,6 +569,7 @@ local extension = {
   gel = 'gel',
   gmi = 'gemtext',
   gemini = 'gemtext',
+  ghostty = 'ghostty',
   gift = 'gift',
   prettierignore = 'gitignore',
   gleam = 'gleam',
@@ -596,8 +637,8 @@ local extension = {
   ihex = 'hex',
   ihe = 'hex',
   ihx = 'hex',
-  int = 'hex',
   mcs = 'hex',
+  hip = 'hip',
   hjson = 'hjson',
   m3u = 'hlsplaylist',
   m3u8 = 'hlsplaylist',
@@ -631,6 +672,7 @@ local extension = {
   ii = 'initng',
   inko = 'inko',
   inp = detect.inp,
+  int = detect.int,
   ms = detect_seq(detect.nroff, 'xmath'),
   ipkg = 'ipkg',
   iss = 'iss',
@@ -678,6 +720,7 @@ local extension = {
   bd = 'json',
   bda = 'json',
   xci = 'json',
+  cps = 'json',
   json5 = 'json5',
   jsonc = 'jsonc',
   jsonl = 'jsonl',
@@ -690,6 +733,7 @@ local extension = {
   JUST = 'just',
   kl = 'karel',
   KL = 'karel',
+  pg = 'kawasaki_as',
   kdl = 'kdl',
   kerml = 'kerml',
   kv = 'kivy',
@@ -761,6 +805,7 @@ local extension = {
   mc = detect.mc,
   quake = 'm3quake',
   m4 = detect.m4,
+  mac = detect.mac,
   eml = 'mail',
   mk = detect.make,
   mak = detect.make,
@@ -775,6 +820,7 @@ local extension = {
   mkd = detect.markdown,
   markdown = detect.markdown,
   mdown = detect.markdown,
+  marko = 'marko',
   masm = 'masm',
   mhtml = 'mason',
   mason = 'mason',
@@ -902,6 +948,7 @@ local extension = {
   obj = 'obj',
   objdump = 'objdump',
   cppobjdump = 'objdump',
+  rtn = 'objectscript_routine',
   obl = 'obse',
   obse = 'obse',
   oblivion = 'obse',
@@ -1138,6 +1185,16 @@ local extension = {
   ss = 'scheme',
   scm = 'scheme',
   sld = 'scheme',
+  stwm = 'scheme',
+  stl = 'scheme',
+  stxt = 'scheme',
+  sprite = 'scheme',
+  strf = 'scheme',
+  satc = 'scheme',
+  stcd = 'scheme',
+  stf = 'scheme',
+  stcp = 'scheme',
+  music = 'scheme',
   stsg = 'scheme',
   sce = 'scilab',
   sci = 'scilab',
@@ -1148,6 +1205,7 @@ local extension = {
   sdl = 'sdl',
   sed = 'sed',
   sexp = 'sexplib',
+  sgf = 'sgf',
   bash = detect.bash,
   bats = detect.bash,
   cygport = detect.bash,
@@ -1225,6 +1283,7 @@ local extension = {
   srt = 'srt',
   ssa = 'ssa',
   ass = 'ssa',
+  allowed_signers = 'sshallowedsigners',
   st = 'st',
   ipd = 'starlark',
   sky = 'starlark',
@@ -1265,6 +1324,7 @@ local extension = {
   itcl = 'tcl',
   tk = 'tcl',
   jacl = 'tcl',
+  xdc = 'tcl',
   tl = 'teal',
   templ = 'templ',
   tmpl = 'template',
@@ -1308,6 +1368,7 @@ local extension = {
   tiltfile = 'tiltfile',
   tla = 'tla',
   tli = 'tli',
+  tolk = 'tolk',
   toml = 'toml',
   tpp = 'tpp',
   treetop = 'treetop',
@@ -1377,6 +1438,7 @@ local extension = {
   wgsl = 'wgsl',
   wbt = 'winbatch',
   wit = 'wit',
+  wks = 'wks',
   wml = 'wml',
   wsf = 'wsh',
   wsc = 'wsh',
@@ -1412,6 +1474,7 @@ local extension = {
   xlc = 'xml',
   xba = 'xml',
   slnx = 'xml',
+  reanim = 'xml',
   xpm = detect_line1('XPM2', 'xpm2', 'xpm'),
   xpm2 = 'xpm2',
   xqy = 'xquery',
@@ -1430,6 +1493,7 @@ local extension = {
   yaml = 'yaml',
   eyaml = 'yaml',
   mplstyle = 'yaml',
+  ksy = 'yaml',
   kyaml = 'yaml',
   kyml = 'yaml',
   grc = detect_line1('<%?xml', 'xml', 'yaml'),
@@ -1668,6 +1732,7 @@ local filename = {
   ['.vscodeignore'] = 'gitignore',
   ['gitolite.conf'] = 'gitolite',
   ['git-rebase-todo'] = 'gitrebase',
+  ['.git-blame-ignore-revs'] = 'gitrevlist',
   gkrellmrc = 'gkrellmrc',
   ['.gnashrc'] = 'gnash',
   ['.gnashpluginrc'] = 'gnash',
@@ -1735,6 +1800,7 @@ local filename = {
   ['.swrc'] = 'jsonc',
   ['.vsconfig'] = 'jsonc',
   ['bun.lock'] = 'jsonc',
+  ['osquery.conf'] = 'jsonc',
   ['.justfile'] = 'just',
   ['.Justfile'] = 'just',
   ['.JUSTFILE'] = 'just',
@@ -1794,6 +1860,7 @@ local filename = {
   ['mplayer.conf'] = 'mplayerconf',
   mrxvtrc = 'mrxvtrc',
   ['.mrxvtrc'] = 'mrxvtrc',
+  msmtprc = 'msmtp',
   ['.msmtprc'] = 'msmtp',
   ['Muttngrc'] = 'muttrc',
   ['Muttrc'] = 'muttrc',
@@ -1834,6 +1901,7 @@ local filename = {
   pinercex = 'pine',
   ['/etc/pinforc'] = 'pinfo',
   ['/.pinforc'] = 'pinfo',
+  PklProject = 'pkl',
   ['.povrayrc'] = 'povini',
   printcap = function(_path, _bufnr)
     return 'ptcap', function(b)
@@ -1922,8 +1990,9 @@ local filename = {
   Snakefile = 'snakemake',
   ['.sqlite_history'] = 'sql',
   ['squid.conf'] = 'squid',
-  ['ssh_config'] = 'sshconfig',
-  ['sshd_config'] = 'sshdconfig',
+  allowed_signers = 'sshallowedsigners',
+  ssh_config = 'sshconfig',
+  sshd_config = 'sshdconfig',
   ['/etc/sudoers'] = 'sudoers',
   ['sudoers.tmp'] = 'sudoers',
   ['/etc/sysctl.conf'] = 'sysctl',
@@ -1995,6 +2064,7 @@ local filename = {
   ['.clangd'] = 'yaml',
   ['.clang-format'] = 'yaml',
   ['.clang-tidy'] = 'yaml',
+  ['buf.lock'] = 'yaml',
   ['pixi.lock'] = 'yaml',
   ['yarn.lock'] = 'yaml',
   matplotlibrc = 'yaml',
@@ -2059,6 +2129,7 @@ local pattern = {
     ['/etc/DIR_COLORS$'] = 'dircolors',
     ['/etc/dnsmasq%.conf$'] = 'dnsmasq',
     ['/etc/dnsmasq%.d/'] = starsetf('dnsmasq'),
+    ['/etc/wireguard/.*%.conf$'] = 'dosini',
     ['/etc/yum%.conf$'] = 'dosini',
     ['/etc/yum%.repos%.d/'] = starsetf('dosini'),
     ['/etc/gitconfig%.d/'] = starsetf('gitconfig'),
@@ -2114,12 +2185,17 @@ local pattern = {
     ['/etc/serial%.conf$'] = 'setserial',
     ['/etc/udev/cdsymlinks%.conf$'] = 'sh',
     ['/etc/profile$'] = detect.sh,
+    ['^/etc/X11/xinit/xinitrc$'] = 'sh',
+    ['^/etc/X11/xinit/xinitrc%.d/'] = 'sh',
+    ['^/etc/X11/xinit/xserverrc$'] = 'sh',
     ['/etc/slp%.conf$'] = 'slpconf',
     ['/etc/slp%.reg$'] = 'slpreg',
     ['/etc/slp%.spi$'] = 'slpspi',
-    ['/etc/sudoers%.d/'] = starsetf('sudoers'),
     ['/etc/ssh/ssh_config%.d/.*%.conf$'] = 'sshconfig',
     ['/etc/ssh/sshd_config%.d/.*%.conf$'] = 'sshdconfig',
+    ['^/etc/ssh/ssh_known_hosts$'] = 'sshknownhosts',
+    ['^/etc/ssh/.+%.pub$'] = 'sshpublickey',
+    ['/etc/sudoers%.d/'] = starsetf('sudoers'),
     ['/etc/sudoers$'] = 'sudoers',
     ['/etc/sysctl%.conf$'] = 'sysctl',
     ['/etc/sysctl%.d/.*%.conf$'] = 'sysctl',
@@ -2444,6 +2520,8 @@ local pattern = {
     ['/mypy/config$'] = 'dosini',
     ['^${HOME}/%.config/notmuch/.*/config$'] = 'dosini',
     ['^${XDG_CONFIG_HOME}/notmuch/.*/config$'] = 'dosini',
+    ['/ghostty/config$'] = 'ghostty',
+    ['/com%.mitchellh%.ghostty/config$'] = 'ghostty',
     ['^${XDG_CONFIG_HOME}/git/config$'] = 'gitconfig',
     ['%.git/config%.worktree$'] = 'gitconfig',
     ['%.git/config$'] = 'gitconfig',
@@ -2475,6 +2553,11 @@ local pattern = {
     ['/%.icewm/menu$'] = 'icemenu',
     ['/%.libao$'] = 'libao',
     ['/%.pinforc$'] = 'pinfo',
+    ['^${HOME}/%.xinitrc$'] = 'sh',
+    ['^${HOME}/%.xserverrc$'] = 'sh',
+    ['/%.ssh/authorized_keys$'] = 'sshauthorizedkeys',
+    ['/%.ssh/known_hosts$'] = 'sshknownhosts',
+    ['/%.ssh/.+%.pub$'] = 'sshpublickey',
     ['/%.cargo/credentials$'] = 'toml',
     ['/%.init/.*%.override$'] = 'upstart',
     ['/%.kube/kuberc$'] = 'yaml',
@@ -2700,6 +2783,7 @@ local pattern = {
     ['^[a-zA-Z].*Properties%.'] = starsetf(detect.foam),
     ['^[a-zA-Z].*Properties$'] = detect.foam,
     ['/tmp/lltmp'] = starsetf('gedcom'),
+    ['/ghostty/themes/'] = starsetf('ghostty'),
     ['^gkrellmrc_.$'] = 'gkrellmrc',
     ['^${GNUPGHOME}/options$'] = 'gpg',
     ['/boot/grub/menu%.lst$'] = 'grub',
@@ -2766,6 +2850,7 @@ local pattern = {
     end),
     ['/queries/.*%.scm$'] = 'query', -- treesitter queries (Neovim only)
     [',v$'] = 'rcs',
+    ['/supertux2/.*/info$'] = 'scheme',
     ['^svn%-commit.*%.tmp$'] = 'svn',
     ['%.swift%.gyb$'] = 'swiftgyb',
     ['^vivado.*%.jou$'] = 'tcl',
@@ -2777,6 +2862,8 @@ local pattern = {
     ['%.t%.html$'] = 'tilde',
     ['%.vhdl_[0-9]'] = starsetf('vhdl'),
     ['vimrc'] = starsetf('vim'),
+    ['%.wks%.in$'] = 'wks',
+    ['%.wks%.inc$'] = 'wks',
     ['/Xresources/'] = starsetf('xdefaults'),
     ['/app%-defaults/'] = starsetf('xdefaults'),
     ['^Xresources'] = starsetf('xdefaults'),
@@ -2885,6 +2972,7 @@ end
 --- the filename is matched against the list of |lua-pattern|s (sorted by priority)
 --- until a match is found. Lastly, if pattern matching does not find a
 --- filetype, then the file extension is used.
+--- Extension mappings match only the text after the final dot in the filename.
 ---
 --- The filetype can be either a string (in which case it is used as the
 --- filetype directly) or a function. If a function, it takes the full path and
@@ -3175,18 +3263,22 @@ function M.match(args)
   end
 
   if name then
+    if name:sub(-1) == '/' and not name:find('^%a[%w+.-]*://') then
+      return 'directory'
+    end
     name = normalize_path(name)
 
-    local path = vim.fs.abspath(name)
-    do -- First check for the simple case where the full path exists as a key
+    local ok_abspath, path = pcall(vim.fs.abspath, name)
+    if ok_abspath then -- First check for the simple case where the full path exists as a key
       local ft, on_detect = dispatch(filename[path], path, bufnr)
       if ft then
         return ft, on_detect
       end
+    else
+      path = name
     end
 
     local tail = vim.fs.basename(name)
-
     do -- Next check against just the file name
       local ft, on_detect = dispatch(filename[tail], path, bufnr)
       if ft then
@@ -3286,6 +3378,22 @@ end
 --- @return string|boolean|integer: Option value
 function M.get_option(filetype, option)
   return require('vim.filetype.options').get_option(filetype, option)
+end
+
+--- Inspect the current state of the filetype registry.
+---
+--- Returns a copy of the internal tables used for filetype detection by extension, filename, or
+--- pattern. Note: Due to the dynamic nature of filetype detection, this is only useful for checking
+--- whether a certain extension, filename, or pattern has been registered so far. In addition, the
+--- `pattern` table is in an internal format optimized for fast lookup. Prefer |vim.filetype.match()|
+--- for checking the detected filetype for a given pattern.
+---@return table<string, table<string, vim.filetype.mapping|table<string, vim.filetype.mapping>>>
+function M.inspect()
+  return {
+    extension = vim.deepcopy(extension),
+    filename = vim.deepcopy(filename),
+    pattern = vim.deepcopy(pattern),
+  }
 end
 
 return M

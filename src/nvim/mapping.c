@@ -26,16 +26,17 @@
 #include "nvim/eval/typval_defs.h"
 #include "nvim/eval/userfunc.h"
 #include "nvim/eval/vars.h"
+#include "nvim/ex_cmds.h"
 #include "nvim/ex_cmds_defs.h"
 #include "nvim/ex_session.h"
 #include "nvim/fuzzy.h"
 #include "nvim/garray.h"
 #include "nvim/garray_defs.h"
-#include "nvim/getchar.h"
-#include "nvim/getchar_defs.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
+#include "nvim/input.h"
+#include "nvim/input_defs.h"
 #include "nvim/keycodes.h"
 #include "nvim/lua/executor.h"
 #include "nvim/macros_defs.h"
@@ -301,6 +302,7 @@ static bool set_maparg_lhs_rhs(const char *const orig_lhs, const size_t orig_lhs
                                const LuaRef rhs_lua, const char *const cpo_val,
                                MapArguments *const mapargs)
 {
+  mapargs->rhs_lua = rhs_lua;
   char lhs_buf[128];
 
   // If mapping has been given as ^V<C_UP> say, then replace the term codes
@@ -459,7 +461,7 @@ static int str_to_mapargs(const char *strargs, bool is_unmap, MapArguments *mapa
   // With :unmap, literal white space is included in the {lhs}; there is no
   // separate {rhs}.
   const char *lhs_end = to_parse;
-  bool do_backslash = (vim_strchr(p_cpo, CPO_BSLASH) == NULL);
+  bool do_backslash = (vim_strchr(p_cpo, kCpoBslash) == NULL);
   while (*lhs_end && (is_unmap || !ascii_iswhite(*lhs_end))) {
     if ((lhs_end[0] == Ctrl_V || (do_backslash && lhs_end[0] == '\\'))
         && lhs_end[1] != NUL) {
@@ -626,22 +628,28 @@ static int buf_do_map(int maptype, MapArguments *args, int mode, bool is_abbrev,
         // vi-compatible way.
         int same = -1;
 
-        const int first = vim_iswordp(lhs);
+        char keys_unescaped[MAXMAPLEN + 1];
+        xmemcpyz(keys_unescaped, lhs, (size_t)len);
+        size_t keys_unescaped_len = vim_unescape_ks(keys_unescaped);
+        const char *p = keys_unescaped;
+
+        const int first = vim_iswordp(p);
         int last = first;
-        const char *p = lhs + utfc_ptr2len(lhs);
+        MB_PTR_ADV(p);
         int n = 1;
-        while (p < lhs + len) {
+        while (p < keys_unescaped + keys_unescaped_len) {
           n++;                                  // nr of (multi-byte) chars
           last = vim_iswordp(p);                // type of last char
           if (same == -1 && last != first) {
             same = n - 1;                       // count of same char type
           }
-          p += utfc_ptr2len(p);
+          MB_PTR_ADV(p);
         }
         if (last && n > 2 && same >= 0 && same < n - 1) {
           retval = 1;
           goto theend;
         }
+
         // An abbreviation cannot contain white space.
         for (n = 0; n < len; n++) {
           if (ascii_iswhite(lhs[n])) {
@@ -1194,7 +1202,7 @@ static char *translate_mapping(const char *const str_in, const char *const cpo_v
   garray_T ga;
   ga_init(&ga, 1, 40);
 
-  const bool cpo_bslash = (vim_strchr(cpo_val, CPO_BSLASH) != NULL);
+  const bool cpo_bslash = (vim_strchr(cpo_val, kCpoBslash) != NULL);
 
   for (; *str; str++) {
     int c = *str;
@@ -1528,13 +1536,12 @@ bool check_abbr(int c, char *ptr, int col, int mincol)
       if (strchr(mp->m_keys, K_SPECIAL) != NULL) {
         // Might have K_SPECIAL escaped mp->m_keys.
         q = xstrdup(mp->m_keys);
-        vim_unescape_ks(q);
-        qlen = (int)strlen(q);
+        qlen = (int)vim_unescape_ks(q);
       }
       // find entries with right mode and keys
       int match = (mp->m_mode & State)
                   && qlen == len
-                  && !strncmp(q, ptr, (size_t)len);
+                  && strncmp(q, ptr, (size_t)len) == 0;
       if (q != mp->m_keys) {
         xfree(q);
       }
@@ -2085,8 +2092,8 @@ static Dict mapblock_fill_dict(const mapblock_T *const mp, const char *lhsrawalt
                                Arena *arena)
   FUNC_ATTR_NONNULL_ARG(1)
 {
-  Dict dict = arena_dict(arena, 19);
-  char *const lhs = str2special_arena(mp->m_keys, compatible, !compatible, arena);
+  Dict dict = arena_dict(arena, 20);
+  char *const lhs = str2special_arena(mp->m_keys, compatible, compatible ? kFalse : kNone, arena);
   char *mapmode = arena_alloc(arena, 7, false);
   map_mode_to_chars(mp->m_mode, mapmode);
   int noremap_value;
@@ -2106,7 +2113,7 @@ static Dict mapblock_fill_dict(const mapblock_T *const mp, const char *lhsrawalt
   } else {
     String rhs = cstr_as_string(compatible
                                 ? mp->m_orig_str
-                                : str2special_arena(mp->m_str, false, true, arena));
+                                : str2special_arena(mp->m_str, false, kNone, arena));
     PUT_C(dict, "rhs", STRING_OBJ(rhs));
   }
   if (mp->m_desc != NULL) {
@@ -2126,6 +2133,9 @@ static Dict mapblock_fill_dict(const mapblock_T *const mp, const char *lhsrawalt
   PUT_C(dict, "scriptversion", INTEGER_OBJ(1));
   PUT_C(dict, "lnum", INTEGER_OBJ(mp->m_script_ctx.sc_lnum));
   PUT_C(dict, "buffer", INTEGER_OBJ(buffer_value));
+  if (!compatible) {
+    PUT_C(dict, "buf", INTEGER_OBJ(buffer_value));
+  }
   PUT_C(dict, "nowait", INTEGER_OBJ(mp->m_nowait ? 1 : 0));
   PUT_C(dict, "replace_keycodes", INTEGER_OBJ(mp->m_replace_keycodes ? 1 : 0));
   PUT_C(dict, "mode", CSTR_AS_OBJ(mapmode));
@@ -2277,6 +2287,10 @@ static int get_map_mode_string(const char *const mode_string, const bool abbr)
 /// "mapset()" function
 void f_mapset(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 {
+  if (check_secure()) {
+    return;
+  }
+
   const char *which;
   char buf[NUMBUFLEN];
   int is_abbr;
@@ -2724,11 +2738,13 @@ void ex_abclear(exarg_T *eap)
 /// Arguments are handled like @ref nvim_set_keymap unless noted.
 /// @param  buffer    Buffer handle for a specific buffer, or 0 for the current
 ///                   buffer, or -1 to signify global behavior ("all buffers")
-/// @param  is_unmap  When true, removes the mapping that matches {lhs}.
-void modify_keymap(uint64_t channel_id, Buffer buffer, bool is_unmap, String mode, String lhs,
+/// @param  maptype   MAPTYPE_MAP to set a mapping, MAPTYPE_UNMAP to remove the mapping that
+///                   matches {lhs} or {rhs}, MAPTYPE_UNMAP_LHS to only match {lhs}.
+void modify_keymap(uint64_t channel_id, Buffer buffer, int maptype, String mode, String lhs,
                    String rhs, Dict(keymap) *opts, Error *err)
 {
   LuaRef lua_funcref = LUA_NOREF;
+  bool is_unmap = maptype == MAPTYPE_UNMAP || maptype == MAPTYPE_UNMAP_LHS;
   bool global = (buffer == -1);
   if (global) {
     buffer = 0;
@@ -2820,14 +2836,11 @@ void modify_keymap(uint64_t channel_id, Buffer buffer, bool is_unmap, String mod
   }
 
   // buf_do_map() reads noremap/unmap as its own argument.
-  int maptype_val = MAPTYPE_MAP;
-  if (is_unmap) {
-    maptype_val = MAPTYPE_UNMAP;
-  } else if (is_noremap) {
-    maptype_val = MAPTYPE_NOREMAP;
+  if (maptype == MAPTYPE_MAP && is_noremap) {
+    maptype = MAPTYPE_NOREMAP;
   }
 
-  switch (buf_do_map(maptype_val, &parsed_args, mode_val, is_abbrev, target_buf)) {
+  switch (buf_do_map(maptype, &parsed_args, mode_val, is_abbrev, target_buf)) {
   case 0:
     break;
   case 1:

@@ -29,14 +29,18 @@ local function colorize_hl_groups(patterns)
   vim.fn.setpos('.', save_cursor)
 end
 
+local function help_bufname_match(bufname, path)
+  return vim.endswith(bufname, path .. '.txt') or bufname:find(path .. '%.%a%ax$')
+end
+
 -- Add custom highlights for list in `:h highlight-groups`.
 local bufname = vim.fs.normalize(vim.api.nvim_buf_get_name(0))
-if vim.endswith(bufname, '/doc/syntax.txt') then
+if help_bufname_match(bufname, '/doc/syntax') then
   colorize_hl_groups({
     { start = [[\*group-name\*]], stop = '^======', match = '^(%w+)\t' },
     { start = [[\*highlight-groups\*]], stop = '^======', match = '^(%w+)\t' },
   })
-elseif vim.endswith(bufname, '/doc/treesitter.txt') then
+elseif help_bufname_match(bufname, '/doc/treesitter') then
   colorize_hl_groups({
     {
       start = [[\*treesitter-highlight-groups\*]],
@@ -44,11 +48,11 @@ elseif vim.endswith(bufname, '/doc/treesitter.txt') then
       match = '^@[%w%p]+',
     },
   })
-elseif vim.endswith(bufname, '/doc/diagnostic.txt') then
+elseif help_bufname_match(bufname, '/doc/diagnostic') then
   colorize_hl_groups({
     { start = [[\*diagnostic-highlights\*]], stop = '^======', match = '^(%w+)' },
   })
-elseif vim.endswith(bufname, '/doc/lsp.txt') then
+elseif help_bufname_match(bufname, '/doc/lsp') then
   colorize_hl_groups({
     { start = [[\*lsp-highlight\*]], stop = '^------', match = '^(%w+)' },
     { start = [[\*lsp-semantic-highlight\*]], stop = '^======', match = '^@[%w%p]+' },
@@ -57,16 +61,16 @@ end
 
 vim.keymap.set('n', 'gO', function()
   require('vim.treesitter._headings').show_toc()
-end, { buffer = 0, silent = true, desc = 'Show an Outline of the current buffer' })
+end, { buf = 0, silent = true, desc = 'Show an Outline of the current buffer' })
 
 vim.keymap.set('n', ']]', function()
   require('vim.treesitter._headings').jump({ count = 1 })
-end, { buffer = 0, silent = false, desc = 'Jump to next section' })
+end, { buf = 0, silent = false, desc = 'Jump to next section' })
 vim.keymap.set('n', '[[', function()
   require('vim.treesitter._headings').jump({ count = -1 })
-end, { buffer = 0, silent = false, desc = 'Jump to previous section' })
+end, { buf = 0, silent = false, desc = 'Jump to previous section' })
 
-local parser = assert(vim.treesitter.get_parser(0, 'vimdoc', { error = false }))
+local parser = assert(vim.treesitter.get_parser(0, 'vimdoc'))
 
 local function runnables()
   ---@type table<integer, { lang: string, code: string }>
@@ -78,7 +82,7 @@ local function runnables()
       (language) @_lang
       .
       (code) @code
-      (#any-of? @_lang "lua" "vim")
+      (#any-of? @_lang "lua\n" "vim\n")
       (#set! @code lang @_lang))
   ]]
   )
@@ -106,12 +110,12 @@ local function runnables()
     local code_block = code_blocks[pos]
     if not code_block then
       vim.print('No code block found')
-    elseif code_block.lang == 'lua' then
+    elseif code_block.lang == 'lua\n' then
       vim.cmd.lua(code_block.code)
-    elseif code_block.lang == 'vim' then
+    elseif code_block.lang == 'vim\n' then
       vim.cmd(code_block.code)
     end
-  end, { buffer = true })
+  end, { buf = 0 })
 end
 
 -- Retry once if the buffer has changed during the iteration of the code

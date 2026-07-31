@@ -731,7 +731,7 @@ void nlua_push_Array(lua_State *lstate, const Array array, int flags)
 void nlua_push_handle(lua_State *lstate, const handle_T item, int flags)
   FUNC_ATTR_NONNULL_ALL
 {
-  lua_pushnumber(lstate, (lua_Number)(item));
+  lua_pushnumber(lstate, (lua_Number)item);
 }
 
 /// Convert given Object to Lua value
@@ -741,6 +741,7 @@ void nlua_push_Object(lua_State *lstate, Object *obj, int flags)
   FUNC_ATTR_NONNULL_ALL
 {
   switch (obj->type) {
+  case kObjectTypeUnset:
   case kObjectTypeNil:
     if (flags & kNluaPushSpecial) {
       lua_pushnil(lstate);

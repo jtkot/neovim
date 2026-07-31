@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local eq = t.eq
 local exec_lua = n.exec_lua
 local clear = n.clear
@@ -390,12 +391,30 @@ describe('vim.ui_attach', function()
       9              bufname(       {12: }         |
       Excommand:call bufadd^(                  |
     ]])
+    -- _cmdline_offset remains set after being turned into a split.
+    exec_lua(function()
+      vim.fn.win_execute(_G.win, 'wincmd J')
+    end)
+    feed('<Tab>') -- Was a signed int overflow; offset was INT_MAX despite cmdline_win being set.
+    eq(9, exec_lua('return vim.api.nvim_win_get_config(_G.win)._cmdline_offset'))
     -- No crash after _cmdline_offset window is closed #35584.
     exec_lua(function()
       vim.ui_detach(_G.ns)
       vim.api.nvim_win_close(_G.win, true)
     end)
     feed('<Esc>:<Tab>')
+    n.assert_alive()
+  end)
+
+  it("does not crash with :norm 'showcmd' from shell message callback #38233", function()
+    exec_lua(function()
+      vim.ui_attach(vim.api.nvim_create_namespace(''), { ext_messages = true }, function(event)
+        if event == 'msg_show' then
+          vim.api.nvim_command('norm! G')
+        end
+      end)
+    end)
+    n.command('set showcmd | !echo "foo"')
     n.assert_alive()
   end)
 end)

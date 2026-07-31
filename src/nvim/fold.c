@@ -982,18 +982,18 @@ int find_wl_entry(win_T *win, linenr_T lnum)
 /// Adjust the Visual area to include any fold at the start or end completely.
 void foldAdjustVisual(void)
 {
-  if (!VIsual_active || !hasAnyFolding(curwin)) {
+  if (!Visual.active || !hasAnyFolding(curwin)) {
     return;
   }
 
   pos_T *start, *end;
 
-  if (ltoreq(VIsual, curwin->w_cursor)) {
-    start = &VIsual;
+  if (ltoreq(Visual.start, curwin->w_cursor)) {
+    start = &Visual.start;
     end = &curwin->w_cursor;
   } else {
     start = &curwin->w_cursor;
-    end = &VIsual;
+    end = &Visual.start;
   }
   if (hasFolding(curwin, start->lnum, &start->lnum, NULL)) {
     start->col = 0;
@@ -1720,7 +1720,7 @@ char *get_foldtext(win_T *wp, linenr_T lnum, linenr_T lnume, foldinfo_T foldinfo
     int level = MIN(foldinfo.fi_level, (int)sizeof(dashes) - 1);
     memset(dashes, '-', (size_t)level);
     dashes[level] = NUL;
-    set_vim_var_string(VV_FOLDDASHES, dashes, -1);
+    set_vim_var_string(VV_FOLDDASHES, dashes, level);
     set_vim_var_nr(VV_FOLDLEVEL, (varnumber_T)level);
 
     // skip evaluating 'foldtext' on errors
@@ -1737,7 +1737,7 @@ char *get_foldtext(win_T *wp, linenr_T lnum, linenr_T lnume, foldinfo_T foldinfo
       Object obj = eval_foldtext(wp);
       if (obj.type == kObjectTypeArray) {
         Error err = ERROR_INIT;
-        *vt = parse_virt_text(obj.data.array, &err, NULL);
+        *vt = parse_virt_text(obj.data.array, &err, NULL, false);
         if (!ERROR_SET(&err)) {
           *buf = NUL;
           text = buf;

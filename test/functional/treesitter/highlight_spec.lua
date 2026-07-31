@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, finally = t.describe, t.it, t.before_each, t.finally
 local clear = n.clear
 local insert = n.insert
 local exec_lua = n.exec_lua
@@ -864,6 +865,37 @@ describe('treesitter highlighting (C)', function()
     })
   end)
 
+  it('supports @noconceal', function()
+    insert([[
+      int foo = bar;
+    ]])
+
+    exec_lua(function()
+      vim.opt.cole = 2
+      local parser = vim.treesitter.get_parser(0, 'c')
+      vim.treesitter.highlighter.new(parser, {
+        queries = {
+          c = [[
+        ((identifier) @conceal
+         (#set! conceal "X"))
+
+        ((identifier) @noconceal
+         (#eq? @noconceal "bar"))
+      ]],
+        },
+      })
+    end)
+
+    screen:expect({
+      grid = [[
+        int {14:X} = bar;                                                     |
+        ^                                                                 |
+        {1:~                                                                }|*15
+                                                                         |
+      ]],
+    })
+  end)
+
   it('@foo.bar groups has the correct fallback behavior', function()
     local get_hl = function(name)
       return api.nvim_get_hl_by_name(name, 1).foreground
@@ -977,6 +1009,26 @@ describe('treesitter highlighting (C)', function()
                                                                          |
       ]],
     })
+  end)
+
+  it('#35575', function()
+    -- Window size is 14x14, and first string literal ends at byte 14
+    -- See: https://github.com/neovim/neovim/pull/35587
+    screen:try_resize(14, 15)
+
+    exec_lua(function()
+      local line = 'A a="\240\157\158\140\240\157\158\140" "aaaaaaaaaaaaaaaaaaaaaaaa";'
+      vim.api.nvim_buf_set_lines(0, 0, -1, true, { line })
+      vim.cmd('set nowrap')
+      vim.treesitter.query.set('c', 'highlights', hl_query_c)
+      vim.treesitter.start(0, 'c')
+    end)
+
+    screen:expect([[
+      {6:^A} a={26:"𝞌𝞌"} {26:"aaaa}|
+      {1:~             }|*13
+                    |
+    ]])
   end)
 end)
 
@@ -1416,6 +1468,21 @@ printf('Hello World!');
       vim.api.nvim_buf_set_lines(0, 0, -1, false, {})
       assert(vim.api.nvim_win_text_height(0, {}).all == 1, 'line concealed')
     end)
+  end)
+
+  it('conceals backslash in hard_line_break/backslash_escape', function()
+    command('set concealcursor=n')
+    command('set conceallevel=2')
+    insert('Hello\\\nWorld\nHello\\. World')
+    screen:expect({
+      grid = [[
+        Hello                                   |
+        World                                   |
+        Hello. Worl^d                            |
+        {1:~                                       }|*2
+                                                |
+      ]],
+    })
   end)
 end)
 

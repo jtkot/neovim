@@ -1,3 +1,5 @@
+local tointeger = vim._tointeger
+
 -- Nvim-Lua stdlib: the `vim` module (:help lua-stdlib)
 --
 
@@ -9,6 +11,7 @@ for k, v in pairs({
   loader = true,
   func = true,
   F = true,
+  log = true,
   lsp = true,
   hl = true,
   diagnostic = true,
@@ -38,18 +41,152 @@ vim._extra = {
   inspect_pos = true,
 }
 
---- @nodoc
-vim.log = {
-  --- @enum vim.log.levels
-  levels = {
-    TRACE = 0,
-    DEBUG = 1,
-    INFO = 2,
-    WARN = 3,
-    ERROR = 4,
-    OFF = 5,
-  },
-}
+--- Waits up to `time` milliseconds, until `callback` returns `true` (success). Executes
+--- `callback` immediately, then on user events, internal events, and approximately every
+--- `interval` milliseconds (default 200). Returns `true` plus any remaining callback
+--- results on success.
+---
+--- Nvim processes other events while waiting.
+--- Cannot be called during an |api-fast| event.
+---
+--- Examples:
+---
+--- ```lua
+--- -- Wait for 100 ms, allowing other events to process.
+--- vim.wait(100)
+---
+--- -- Wait up to 1000 ms or until `vim.g.foo` is true, at intervals of ~500 ms.
+--- vim.wait(1000, function() return vim.g.foo end, 500)
+---
+--- -- Wait indefinitely until `vim.g.foo` is true, and get the callback results.
+--- local ok, rv1, rv2, rv3 = vim.wait(math.huge, function()
+---   return vim.g.foo, 'a', 42, { ok = { 'yes' } }
+--- end)
+---
+--- -- Schedule a function to set a value in 100ms. This would wait 10s if blocked, but actually
+--- -- only waits 100ms because `vim.wait` processes other events while waiting.
+--- vim.defer_fn(function() vim.g.timer_result = true end, 100)
+--- if vim.wait(10000, function() return vim.g.timer_result end) then
+---   print('Only waiting a little bit of time!')
+--- end
+---
+--- -- Yield via vim.wait() to allow CTRL-C to interrupt Lua code.
+--- while true do
+---   -- ...work...
+---   local _, code = vim.wait(0, nil, 0)
+---   if code == -2 then -- CTRL-C.
+---     break
+---   end
+--- end
+--- ```
+---
+--- @param time number Number of milliseconds to wait. Must be non-negative number, any fractional
+--- part is truncated.
+--- @param callback? fun(): boolean, ... Optional callback. Waits until {callback} returns true
+--- @param interval? integer (Approximate) number of milliseconds to wait between polls
+--- @param fast_only? boolean If true, only |api-fast| events will be processed.
+--- @return boolean, nil|-1|-2, ...
+---     - If callback returns `true` before timeout: `true, ...` (remaining callback results).
+---     - On timeout: `false, -1`
+---     - On interrupt: `false, -2`
+---     - On error: the error is raised.
+function vim.wait(time, callback, interval, fast_only)
+  if vim.in_fast_event() then
+    error('E5560: vim.wait must not be called in a fast event context', 0)
+  end
+
+  vim.validate('time', time, 'number')
+  if time < 0 then
+    error('timeout must be >= 0')
+  end
+  local has_deadline = time == time and time ~= math.huge
+  if has_deadline then
+    time = math.floor(time)
+  end
+
+  vim.validate('callback', callback, 'callable', true)
+
+  vim.validate('interval', interval, 'number', true)
+  if interval then
+    interval = math.floor(interval)
+    if interval < 0 then
+      error('interval must be >= 0')
+    end
+  else
+    interval = 200
+  end
+
+  vim.validate('fast_only', fast_only, 'boolean', true)
+  if fast_only == nil then
+    fast_only = false
+  end
+
+  local start = vim.uv.hrtime()
+  local dummy_timer --- @type uv.uv_timer_t?
+
+  local function cleanup()
+    if dummy_timer and not dummy_timer:is_closing() then
+      dummy_timer:stop()
+      dummy_timer:close()
+    end
+  end
+
+  if interval > 0 then
+    dummy_timer = assert(vim.uv.new_timer())
+    dummy_timer:start(interval, interval, function()
+      -- If Nvim exits while loop_poll() is blocked, vim.wait() does not
+      -- resume.
+      if vim.v.exiting ~= vim.NIL then
+        cleanup()
+      end
+    end)
+  end
+
+  -- Flush screen updates before blocking.
+  vim._core.ui_flush()
+
+  while true do
+    if vim._core.check_interrupt() then
+      cleanup()
+      return false, -2
+    end
+
+    if callback then
+      local results = vim.F.pack_len(pcall(callback))
+      if not results[1] then
+        cleanup()
+        error(results[2], 0)
+      elseif results[2] then
+        cleanup()
+        return true, unpack(results, 3, results.n)
+      end
+    end
+
+    local poll_timeout = -1
+    if has_deadline then
+      local remaining_ms = time - (vim.uv.hrtime() - start) / 1e6
+      -- loop_poll() takes an integer timeout, so cap each individual poll while still honoring
+      -- larger overall waits. Always poll at least once, so vim.wait(0) still pumps the event loop
+      -- (lets user code "yield" to CTRL-C).
+      poll_timeout = math.max(0, math.min(math.ceil(remaining_ms), vim._maxint))
+    end
+
+    -- The dummy timer wakes `vim._core.loop_poll()` on interval boundaries. Without it,
+    -- polling would only resume for unrelated events or the final timeout.
+    vim._core.loop_poll(poll_timeout, fast_only)
+
+    -- Check deadline AFTER polling (mirrors LOOP_PROCESS_EVENTS_UNTIL behavior).
+    -- `got_int` may have been set during poll; let check_interrupt() catch it.
+    if has_deadline and time - (vim.uv.hrtime() - start) / 1e6 <= 0 then
+      if vim._core.check_interrupt() then
+        cleanup()
+        return false, -2
+      end
+      cleanup()
+      return false, -1
+    end
+  end
+end
 
 local utfs = {
   ['utf-8'] = true,
@@ -74,7 +211,7 @@ function vim._os_proc_info(pid)
   local ppid_string = assert(vim.system({ 'ps', '-p', pid, '-o', 'ppid=' }):wait().stdout)
   -- Remove trailing whitespace.
   name = vim.trim(name):gsub('^.*/', '')
-  local ppid = tonumber(ppid_string) or -1
+  local ppid = tointeger(ppid_string) or -1
   return {
     name = name,
     pid = pid,
@@ -95,12 +232,9 @@ function vim._os_proc_children(ppid)
   elseif r.code ~= 0 then
     error('command failed: ' .. vim.fn.string(cmd))
   end
-  local children = {}
+  local children = {} --- @type integer[]
   for s in r.stdout:gmatch('%S+') do
-    local i = tonumber(s)
-    if i ~= nil then
-      table.insert(children, i)
-    end
+    children[#children + 1] = tointeger(s)
   end
   return children
 end
@@ -305,7 +439,7 @@ end
 
 local VIM_CMD_ARG_MAX = 20
 
---- Executes Vimscript (|Ex-commands|).
+--- Executes Vimscript (|Ex-command|s).
 ---
 --- Can be indexed with a command name to get a function, thus you can write `vim.cmd.echo(…)`
 --- instead of `vim.cmd{cmd='echo',…}`.
@@ -337,26 +471,29 @@ local VIM_CMD_ARG_MAX = 20
 ---
 --- -- Ex command :vertical resize +2
 --- vim.cmd.resize({ '+2', mods = { vertical = true } })
+---
+--- -- Pass arg literally, without needing to escape special chars:
+--- vim.cmd.edit({ '%foo"|bar#baz"', magic = { file = false, bar = false } })
 --- ```
 ---
 ---@diagnostic disable-next-line: undefined-doc-param
----@param command string|table Command(s) to execute.
+---@param cmd string|table Command(s) to execute.
 ---       - The string form supports multiline Vimscript (alias to |nvim_exec2()|, behaves
 ---         like |:source|).
 ---       - The table form executes a single command (alias to |nvim_cmd()|).
 ---@see |ex-cmd-index|
 vim.cmd = setmetatable({}, {
-  __call = function(_, command)
-    if type(command) == 'table' then
-      return vim.api.nvim_cmd(command, {})
+  __call = function(_, cmd)
+    if type(cmd) == 'table' then
+      return vim.api.nvim_cmd(cmd)
     else
-      vim.api.nvim_exec2(command, {})
+      vim.api.nvim_exec2(cmd)
       return ''
     end
   end,
   --- @param t table<string,function>
-  __index = function(t, command)
-    t[command] = function(...)
+  __index = function(t, cmd)
+    t[cmd] = function(...)
       local opts --- @type vim.api.keyset.cmd
       if select('#', ...) == 1 and type(select(1, ...)) == 'table' then
         --- @type vim.api.keyset.cmd
@@ -377,10 +514,10 @@ vim.cmd = setmetatable({}, {
       else
         opts = { args = { ... } }
       end
-      opts.cmd = command
-      return vim.api.nvim_cmd(opts, {})
+      opts.cmd = cmd
+      return vim.api.nvim_cmd(opts)
     end
-    return t[command]
+    return t[cmd]
   end,
 })
 
@@ -476,17 +613,17 @@ function vim.region(bufnr, pos1, pos2, regtype, inclusive)
     local c2 --- @type number
     if regtype:byte() == 22 then -- block selection: take width from regtype
       c1 = pos1[2]
-      c2 = c1 + tonumber(regtype:sub(2))
+      c2 = c1 + vim._assert_integer(regtype:sub(2))
       -- and adjust for non-ASCII characters
       local bufline = vim.api.nvim_buf_get_lines(bufnr, l, l + 1, true)[1]
       local utflen = vim.str_utfindex(bufline, 'utf-32', #bufline)
       if c1 <= utflen then
-        c1 = assert(tonumber(vim.str_byteindex(bufline, 'utf-32', c1)))
+        c1 = vim.str_byteindex(bufline, 'utf-32', c1)
       else
         c1 = #bufline + 1
       end
       if c2 <= utflen then
-        c2 = assert(tonumber(vim.str_byteindex(bufline, 'utf-32', c2)))
+        c2 = vim.str_byteindex(bufline, 'utf-32', c2)
       else
         c2 = #bufline + 1
       end
@@ -508,9 +645,8 @@ end
 
 --- Defers calling {fn} until {timeout} ms passes.
 ---
---- Use to do a one-shot timer that calls {fn}
---- Note: The {fn} is |vim.schedule()|d automatically, so API functions are
---- safe to call.
+--- Use to do a one-shot timer that calls {fn}.
+--- Note: The {fn} is |schedule|d automatically, so API functions are safe to call.
 ---@param fn function Callback to call once `timeout` expires
 ---@param timeout integer Number of milliseconds to wait before calling `fn`
 ---@return uv.uv_timer_t timer luv timer object
@@ -546,7 +682,11 @@ end
 ---@diagnostic disable-next-line: unused-local
 function vim.notify(msg, level, opts) -- luacheck: no unused args
   local chunks = { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
-  vim.api.nvim_echo(chunks, true, { err = level == vim.log.levels.ERROR })
+  vim.api.nvim_echo(
+    chunks,
+    true,
+    { err = level == vim.log.levels.ERROR, _truncate = opts and opts._truncate }
+  )
 end
 
 do
@@ -573,31 +713,34 @@ end
 
 local on_key_cbs = {} --- @type table<integer,[function, table]>
 
---- Adds Lua function {fn} with namespace id {ns_id} as a listener to every,
---- yes every, input key.
+--- Registers function {fn} with [namespace] {ns_id} as a listener to every, yes EVERY, input key.
 ---
---- The Nvim command-line option |-w| is related but does not support callbacks
---- and cannot be toggled dynamically.
+--- To parse [key-chord]s, see |vim.keycode()|. Example:
+--- ```lua
+--- local keychords = vim.keycode(vim.fn.keytrans(key), true)
+--- ```
 ---
+--- The |-w| command-line option is related but does not support callbacks and cannot be toggled
+--- dynamically.
+---
+---@note If {fn} returns an empty string, {key} is discarded/ignored; if {key} is [<Cmd>] then the
+---      "[<Cmd>]…[<CR>]" sequence is discarded as a whole.
+---@note Non-recursive: if {fn} itself consumes input, it won't be invoked for those keys.
+---@note To UNregister a given {ns_id}, pass `nil` {fn}.
 ---@note {fn} will be removed on error.
----@note {fn} won't be invoked recursively, i.e. if {fn} itself consumes input,
----           it won't be invoked for those keys.
 ---@note {fn} will not be cleared by |nvim_buf_clear_namespace()|
 ---
 ---@param fn nil|fun(key: string, typed: string): string? Function invoked for every input key,
----          after mappings have been applied but before further processing. Arguments
----          {key} and {typed} are raw keycodes, where {key} is the key after mappings
----          are applied, and {typed} is the key(s) before mappings are applied.
----          {typed} may be empty if {key} is produced by non-typed key(s) or by the
----          same typed key(s) that produced a previous {key}.
----          If {fn} returns an empty string, {key} is discarded/ignored, and if {key}
----          is [<Cmd>] then the "[<Cmd>]…[<CR>]" sequence is discarded as a whole.
----          When {fn} is `nil`, the callback associated with namespace {ns_id} is removed.
----@param ns_id integer? Namespace ID. If nil or 0, generates and returns a
----                      new |nvim_create_namespace()| id.
+---          after mappings have been applied but before further processing. Arguments {key} and
+---          {typed} are raw input (use [keytrans()] to get [keycodes]).
+---          - {key} is the key after mappings are applied.
+---          - {typed} is the input before mappings are applied; may be empty if {key} was produced
+---            by non-typed key(s) or by the same typed key(s) that produced a previous {key}.
+---@param ns_id integer? Namespace ID. If nil or 0, returns a new |namespace| id.
 ---@param opts table? Optional parameters
 ---
 ---@see |keytrans()|
+---@see |vim.keycode()|
 ---
 ---@return integer Namespace id associated with {fn}. Or count of all callbacks
 ---if on_key() is called without arguments.
@@ -1120,20 +1263,58 @@ function vim.print(...)
   return vim._print(false, ...)
 end
 
---- Translates keycodes.
+--- @class vim.keycode.chord
+--- @inlinedoc
 ---
---- Example:
+--- Key without modifiers.
+--- Example: `<C-A>` has `key="a"`.
+--- @field key string
+---
+--- Alternative spelling of `key`, or nil if There Is No Alternative (TINA).
+--- Example: `"<"` has `key_alt="lt"`.
+--- @field key_alt string?
+---
+--- Full key-chord in canonical key-notation (as produced by |keytrans()|), including modifiers.
+--- Example: `<A-f>` has `keys="<M-f>"`.
+--- @field keys string
+---
+--- List of key-chord modifiers.
+--- Example: `<C-S-f>` has `mod={ 'C', 'S' }`.
+--- @field mod ('M'|'T'|'C'|'S'|'2'|'3'|'4'|'D')[]
+
+--- Converts keys from [key-notation] to the internal encoding. Optionally returns structured
+--- [key-chord]() info as retval 2.
+---
+--- Inverse of [keytrans()], which converts the internal encoding back to [key-notation].
+---
+--- Examples:
 ---
 --- ```lua
 --- local k = vim.keycode
 --- vim.g.mapleader = k'<bs>'
+---
+--- -- Split a key sequence into chords, e.g. to inspect modifiers.
+--- local _, chords = vim.keycode('<C-w>v', true)
+--- assert(chords[1].key == 'w' and chords[1].mod[1] == 'C')
+---
+--- -- keytrans() is the inverse: internal encoding => key-notation.
+--- assert(vim.fn.keytrans(vim.keycode('<C-a>')) == '<C-A>')
 --- ```
 ---
---- @param str string String to be converted.
---- @return string
+---
+--- @param keys string Keys in [key-notation].
+--- @param info boolean? Also return key-chord info.
+--- @return string # Internal representation of the given `keys`.
+--- @return vim.keycode.chord[]? # List of parsed key-chords, each with fields:
 --- @see |nvim_replace_termcodes()|
-function vim.keycode(str)
-  return vim.api.nvim_replace_termcodes(str, true, true, true)
+--- @see |keytrans()|
+function vim.keycode(keys, info)
+  if info then
+    local keycode = vim.keycode(keys)
+    return keycode, vim._core.keyparse(keycode)
+  else
+    return vim.api.nvim_replace_termcodes(keys, true, true, true)
+  end
 end
 
 --- @param server_addr string
@@ -1212,9 +1393,7 @@ end
 do
   local function truncated_echo(msg)
     -- Truncate message to avoid hit-enter-prompt
-    local max_width = vim.o.columns * math.max(vim.o.cmdheight - 1, 0) + vim.v.echospace
-    local msg_truncated = string.sub(msg, 1, max_width)
-    vim.api.nvim_echo({ { msg_truncated, 'WarningMsg' } }, true, {})
+    vim.api.nvim_echo({ { msg, 'WarningMsg' } }, true, { _truncate = true })
   end
 
   local notified = false
@@ -1254,7 +1433,7 @@ end
 ---                              Defaults to "Nvim".
 ---@param backtrace   boolean|nil Prints backtrace. Defaults to true.
 ---
----@return string|nil # Deprecated message, or nil if no message was shown.
+---@return string|nil # Deprecation message, or nil if no message was shown.
 function vim.deprecate(name, alternative, version, plugin, backtrace)
   plugin = plugin or 'Nvim'
   if plugin == 'Nvim' then
@@ -1264,7 +1443,7 @@ function vim.deprecate(name, alternative, version, plugin, backtrace)
     -- Example: if removal `version` is 0.12 (soft-deprecated since 0.10-dev), show warnings
     -- starting at 0.11, including 0.11-dev.
     local major, minor = version:match('(%d+)%.(%d+)')
-    major, minor = tonumber(major), tonumber(minor)
+    major, minor = tointeger(major), tointeger(minor)
     local nvim_major = 0 --- Current Nvim major version.
 
     -- We can't "subtract" from a major version, so:

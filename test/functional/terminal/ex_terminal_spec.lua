@@ -2,6 +2,8 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.finally
 local assert_alive = n.assert_alive
 local clear, poke_eventloop = n.clear, n.poke_eventloop
 local testprg, source, eq, neq = n.testprg, n.source, t.eq, t.neq
@@ -11,11 +13,11 @@ local fn = n.fn
 local api = n.api
 local exec_lua = n.exec_lua
 local retry = t.retry
+local pcall_err = t.pcall_err
 local ok = t.ok
 local command = n.command
 local skip = t.skip
 local is_os = t.is_os
-local is_ci = t.is_ci
 
 describe(':terminal', function()
   local screen
@@ -51,7 +53,7 @@ describe(':terminal', function()
   end)
 
   it('reads output buffer on terminal reporting #4151', function()
-    skip(is_ci('cirrus') or is_os('win'))
+    skip(is_os('win'))
     if is_os('win') then
       command(
         [[terminal powershell -NoProfile -NoLogo -Command Write-Host -NoNewline "\"$([char]27)[6n\""; Start-Sleep -Milliseconds 500 ]]
@@ -104,6 +106,17 @@ describe(':terminal', function()
     local jumps = fn.split(fn.execute('jumps'), '\n')
     eq(' jump line  col file/text', jumps[1])
     eq(3, #jumps)
+  end)
+
+  it("triggers 'autowrite'", function()
+    api.nvim_set_option_value('autowrite', true, {})
+    command('vnew Xtermautowritetestfile | setlocal fileformat=unix')
+    finally(function()
+      os.remove('Xtermautowritetestfile')
+    end)
+    fn.setline(1, 'test content')
+    command('terminal')
+    eq('test content\n', t.read_file('Xtermautowritetestfile'))
   end)
 
   it('nvim_get_mode() in :terminal', function()
@@ -215,7 +228,7 @@ local function test_terminal_with_fake_shell(backslash)
     command('terminal')
     screen:expect([[
       ^ready $                                           |
-      [Process exited 0]                                |
+                                                        |
                                                         |*2
     ]])
   end)
@@ -297,17 +310,13 @@ local function test_terminal_with_fake_shell(backslash)
     command('terminal')
     screen:expect([[
       ^ready $                                           |
-      [Process exited 0]                                |
+                                                        |
                                                         |*2
     ]])
     eq('term://', string.match(eval('bufname("%")'), '^term://'))
     feed([[<C-\><C-N>]])
     command([[find */Xuniquefile]])
-    if is_os('win') then
-      eq('Xsomedir\\Xuniquefile', eval('bufname("%")'))
-    else
-      eq('Xsomedir/Xuniquefile', eval('bufname("%")'))
-    end
+    eq('Xsomedir/Xuniquefile', eval('bufname("%")'))
   end)
 
   it('works with gf', function()

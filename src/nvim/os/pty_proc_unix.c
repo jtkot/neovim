@@ -217,7 +217,10 @@ int pty_proc_spawn(PtyProc *ptyproc)
       && (status = set_duplicating_descriptor(master, &proc->in.uv.pipe))) {
     goto error;
   }
-  // The stream_init() call in proc_spawn() will initialize proc->out.s.uv.poll.
+  if (!proc->out.s.closed
+      && (status = set_duplicating_descriptor(master, &proc->out.s.uv.pipe))) {
+    goto error;
+  }
 
   ptyproc->tty_fd = master;
   proc->pid = pid;
@@ -251,7 +254,7 @@ void pty_proc_resume(PtyProc *ptyproc)
 }
 
 /// On Linux, libuv's polling (which uses epoll) doesn't flush PTY master's pending
-/// work on kernel workqueue, so use an explcit poll() before that. #37982
+/// work on kernel workqueue, so use an explicit poll() before that. #37982
 /// Note that poll() only flushes pending work if no data is immediately available,
 /// so this function is needed before every libuv poll in flush_stream().
 void pty_proc_flush_master(PtyProc *ptyproc)
@@ -293,7 +296,7 @@ void pty_proc_teardown(Loop *loop)
 static void init_child(PtyProc *ptyproc)
   FUNC_ATTR_NONNULL_ALL FUNC_ATTR_NORETURN
 {
-#if defined(HAVE__NSGETENVIRON)
+#ifdef HAVE__NSGETENVIRON
 # define environ (*_NSGetEnviron())
 #else
   extern char **environ;

@@ -16,6 +16,8 @@ local testprg = n.testprg
 local exec_lua = n.exec_lua
 local api = n.api
 local nvim_prog = n.nvim_prog
+local retry = t.retry
+local eq = t.eq
 
 local M = {}
 
@@ -201,7 +203,7 @@ function M.setup_child_nvim(args, opts)
   opts = opts or {}
   local argv = { nvim_prog, unpack(args or {}) }
 
-  local env = opts.env or {}
+  local env = t.shallowcopy(opts.env) or {}
   env.VIMRUNTIME = env.VIMRUNTIME or os.getenv('VIMRUNTIME')
   env.NVIM_TEST = env.NVIM_TEST or os.getenv('NVIM_TEST')
 
@@ -212,13 +214,32 @@ end
 --- Remove this function when that's fixed.
 ---
 --- @param screen test.functional.ui.screen
---- @param s string
-function M.screen_expect(screen, s)
-  if t.is_os('win') then
-    s = s:gsub(' *%} +%|\n', '{MATCH: *}}{MATCH: *}|\n')
-    s = s:gsub('%}%^ +%|\n', '{MATCH:[ ^]*}}{MATCH:[ ^]*}|\n')
+function M.override_screen_expect_for_conpty(screen)
+  if not t.is_os('win') then
+    return
   end
-  screen:expect(s)
+  local orig_screen_expect = screen.expect
+  function screen.expect(self, expected, attr_ids, ...)
+    if type(expected) == 'string' then
+      expected = expected:gsub(' *%} +%|\n', '{MATCH: *}}{MATCH: *}|\n')
+      expected = expected:gsub('%}%^ +%|\n', '{MATCH:[ ^]*}}{MATCH:[ ^]*}|\n')
+    end
+    orig_screen_expect(self, expected, attr_ids, ...)
+  end
+end
+
+--- Asserts that the exit code of chan eventually matches the expected exit code
+---
+--- @param code integer expected exit code
+--- @param chan? integer channel id, defaults to current buffer's channel
+function M.expect_exitcode(code, chan)
+  chan = chan or api.nvim_get_option_value('channel', { buf = 0 }) or 0
+  eq(true, chan > 0, 'Expected a valid channel ID, but got: ' .. chan)
+
+  retry(nil, nil, function()
+    local info = api.nvim_get_chan_info(chan)
+    eq(code, info.exitcode)
+  end)
 end
 
 return M

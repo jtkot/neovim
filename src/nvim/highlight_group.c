@@ -67,9 +67,9 @@ enum {
 static garray_T highlight_ga = GA_EMPTY_INIT_VALUE;
 
 // arena for object with same lifetime as highlight_ga (aka hl_table)
-Arena highlight_arena = ARENA_EMPTY;
+static Arena highlight_arena = ARENA_EMPTY;
 
-Map(cstr_t, int) highlight_unames = MAP_INIT;
+static Map(cstr_t, int) highlight_unames = MAP_INIT;
 
 /// The "term", "cterm" and "gui" arguments can be any combination of the
 /// following names, separated by commas (but no spaces!).
@@ -112,6 +112,7 @@ typedef struct {
   int sg_rgb_sp_idx;            ///< RGB special color index
 
   int sg_blend;                 ///< blend level (0-100 inclusive), -1 if unset
+  char *sg_font;                ///< font name, NULL if not set
 
   int sg_parent;                ///< parent of @nested.group
 } HlGroup;
@@ -217,6 +218,7 @@ static const char *highlight_init_both[] = {
   "default link Debug          Special",
   // Used by HLF_8 (very common). None of the HLF_* things use the other Special* groups.
   "default link SpecialKey     Special",
+  "default link Dimmed         Comment",
   "default link Ignore         Normal",
 
   // Built-in LSP
@@ -919,6 +921,7 @@ void set_hl_group(int id, HlAttrs attrs, Dict(highlight) *dict, int link_id)
 
   HlGroup *g = &hl_table[idx];
   g->sg_cleared = false;
+  int old_link = g->sg_link;
 
   if (link_id >= 0) {
     g->sg_link = link_id;
@@ -936,6 +939,7 @@ void set_hl_group(int id, HlAttrs attrs, Dict(highlight) *dict, int link_id)
     g->sg_link = 0;
   }
 
+  bool update = HAS_KEY(dict, highlight, update) && dict->update;
   g->sg_gui = attrs.rgb_ae_attr &~HL_DEFAULT;
 
   g->sg_rgb_fg = attrs.rgb_fg_color;
@@ -954,20 +958,45 @@ void set_hl_group(int id, HlAttrs attrs, Dict(highlight) *dict, int link_id)
   };
 
   for (int j = 0; cattrs[j].dest; j++) {
-    if (cattrs[j].val < 0) {
+    if (cattrs[j].name.type != kObjectTypeNil) {
+      if (cattrs[j].val < 0) {
+        *cattrs[j].dest = kColorIdxNone;
+      } else if (cattrs[j].name.type == kObjectTypeString && cattrs[j].name.data.string.size) {
+        name_to_color(cattrs[j].name.data.string.data, cattrs[j].dest);
+      } else {
+        *cattrs[j].dest = kColorIdxHex;
+      }
+    } else if (!update) {
       *cattrs[j].dest = kColorIdxNone;
-    } else if (cattrs[j].name.type == kObjectTypeString && cattrs[j].name.data.string.size) {
-      name_to_color(cattrs[j].name.data.string.data, cattrs[j].dest);
-    } else {
-      *cattrs[j].dest = kColorIdxHex;
+    } else if (old_link > 0 && cattrs[j].val >= 0) {
+      // Copy color indices from the linked group so inherited colors remain visible in :hi output.
+      HlGroup *linked = &hl_table[old_link - 1];
+      int linked_idx = (j == 0) ? linked->sg_rgb_fg_idx
+                                : (j == 1) ? linked->sg_rgb_bg_idx
+                                           : linked->sg_rgb_sp_idx;
+      *cattrs[j].dest = (linked_idx != kColorIdxNone) ? linked_idx : kColorIdxHex;
     }
   }
 
   g->sg_cterm = attrs.cterm_ae_attr &~HL_DEFAULT;
   g->sg_cterm_bg = attrs.cterm_bg_color;
   g->sg_cterm_fg = attrs.cterm_fg_color;
+
   g->sg_cterm_bold = g->sg_cterm & HL_BOLD;
-  g->sg_blend = attrs.hl_blend;
+  if (attrs.hl_blend != -1) {
+    g->sg_blend = attrs.hl_blend;
+  } else if (!update) {
+    g->sg_blend = -1;
+  }
+
+  // Persist the font name so set_hl_attr() can rebuild it after a table reset.
+  // attrs.font already encodes update-inheritance and an explicit "NONE".
+  if (attrs.font >= 0) {
+    xfree(g->sg_font);
+    g->sg_font = xstrdup(hl_get_font(attrs.font));
+  } else if (HAS_KEY(dict, highlight, font) || !update) {
+    XFREE_CLEAR(g->sg_font);
+  }
 
   g->sg_script_ctx = current_sctx;
   g->sg_script_ctx.sc_lnum += SOURCING_LNUM;
@@ -1002,6 +1031,25 @@ void set_hl_group(int id, HlAttrs attrs, Dict(highlight) *dict, int link_id)
     redraw_all_later(UPD_NOT_VALID);
   }
   need_highlight_changed = true;
+}
+
+static bool set_gui_color(int idx, bool init, const char *arg, RgbValue *color, int *color_idx)
+{
+  if (init && (hl_table[idx].sg_set & SG_GUI)) {
+    return false;
+  }
+  if (!init) {
+    hl_table[idx].sg_set |= SG_GUI;
+  }
+  RgbValue old_color = *color;
+  int old_idx = *color_idx;
+  if (strcmp(arg, "NONE") != 0) {
+    *color = name_to_color(arg, color_idx);
+  } else {
+    *color = -1;
+    *color_idx = kColorIdxNone;
+  }
+  return *color != old_color || *color_idx != old_idx;
 }
 
 /// Handle ":highlight" command
@@ -1265,7 +1313,7 @@ void do_highlight(const char *line, const bool forceit, const bool init)
         while (arg[off] != NUL) {
           for (i = ARRAY_SIZE(hl_attr_table); --i >= 0;) {
             int len = (int)strlen(hl_name_table[i]);
-            if (STRNICMP(arg + off, hl_name_table[i], len) == 0) {
+            if (STRNICMP(arg + off, hl_name_table[i], (size_t)len) == 0) {
               if (hl_attr_table[i] & HL_UNDERLINE_MASK) {
                 attr &= ~HL_UNDERLINE_MASK;
               }
@@ -1302,8 +1350,16 @@ void do_highlight(const char *line, const bool forceit, const bool init)
             hl_table[idx].sg_gui = attr;
           }
         }
-      } else if (strcmp(key, "FONT") == 0) {
-        // in non-GUI fonts are simply ignored
+      } else if (strcmp(key, "FONT") == 0 && (!init || !(hl_table[idx].sg_set & SG_GUI))) {
+        if (!init) {
+          hl_table[idx].sg_set |= SG_GUI;
+        }
+        if (hl_table[idx].sg_font != NULL) {
+          XFREE_CLEAR(hl_table[idx].sg_font);
+        }
+        if (strcmp(arg, "NONE") != 0) {
+          hl_table[idx].sg_font = xstrdup(arg);
+        }
       } else if (strcmp(key, "CTERMFG") == 0 || strcmp(key, "CTERMBG") == 0) {
         if (!init || !(hl_table[idx].sg_set & SG_CTERM)) {
           if (!init) {
@@ -1392,7 +1448,7 @@ void do_highlight(const char *line, const bool forceit, const bool init)
                       && dark != (*p_bg == 'd')
                       && !option_was_set(kOptBackground)) {
                     set_option_value_give_err(kOptBackground,
-                                              CSTR_AS_OPTVAL(dark ? "dark" : "light"), 0);
+                                              CSTR_AS_OBJ(dark ? "dark" : "light"), 0);
                     reset_option_was_set(kOptBackground);
                   }
                 }
@@ -1401,73 +1457,20 @@ void do_highlight(const char *line, const bool forceit, const bool init)
           }
         }
       } else if (strcmp(key, "GUIFG") == 0) {
-        int *indexp = &hl_table[idx].sg_rgb_fg_idx;
-
-        if (!init || !(hl_table[idx].sg_set & SG_GUI)) {
-          if (!init) {
-            hl_table[idx].sg_set |= SG_GUI;
-          }
-
-          RgbValue old_color = hl_table[idx].sg_rgb_fg;
-          int old_idx = hl_table[idx].sg_rgb_fg_idx;
-
-          if (strcmp(arg, "NONE") != 0) {
-            hl_table[idx].sg_rgb_fg = name_to_color(arg, indexp);
-          } else {
-            hl_table[idx].sg_rgb_fg = -1;
-            hl_table[idx].sg_rgb_fg_idx = kColorIdxNone;
-          }
-
-          did_change = hl_table[idx].sg_rgb_fg != old_color || hl_table[idx].sg_rgb_fg != old_idx;
-        }
-
+        did_change = set_gui_color(idx, init, arg, &hl_table[idx].sg_rgb_fg,
+                                   &hl_table[idx].sg_rgb_fg_idx);
         if (is_normal_group) {
           normal_fg = hl_table[idx].sg_rgb_fg;
         }
       } else if (strcmp(key, "GUIBG") == 0) {
-        int *indexp = &hl_table[idx].sg_rgb_bg_idx;
-
-        if (!init || !(hl_table[idx].sg_set & SG_GUI)) {
-          if (!init) {
-            hl_table[idx].sg_set |= SG_GUI;
-          }
-
-          RgbValue old_color = hl_table[idx].sg_rgb_bg;
-          int old_idx = hl_table[idx].sg_rgb_bg_idx;
-
-          if (strcmp(arg, "NONE") != 0) {
-            hl_table[idx].sg_rgb_bg = name_to_color(arg, indexp);
-          } else {
-            hl_table[idx].sg_rgb_bg = -1;
-            hl_table[idx].sg_rgb_bg_idx = kColorIdxNone;
-          }
-
-          did_change = hl_table[idx].sg_rgb_bg != old_color || hl_table[idx].sg_rgb_bg != old_idx;
-        }
-
+        did_change = set_gui_color(idx, init, arg, &hl_table[idx].sg_rgb_bg,
+                                   &hl_table[idx].sg_rgb_bg_idx);
         if (is_normal_group) {
           normal_bg = hl_table[idx].sg_rgb_bg;
         }
       } else if (strcmp(key, "GUISP") == 0) {
-        int *indexp = &hl_table[idx].sg_rgb_sp_idx;
-
-        if (!init || !(hl_table[idx].sg_set & SG_GUI)) {
-          if (!init) {
-            hl_table[idx].sg_set |= SG_GUI;
-          }
-
-          RgbValue old_color = hl_table[idx].sg_rgb_sp;
-          int old_idx = hl_table[idx].sg_rgb_sp_idx;
-
-          if (strcmp(arg, "NONE") != 0) {
-            hl_table[idx].sg_rgb_sp = name_to_color(arg, indexp);
-          } else {
-            hl_table[idx].sg_rgb_sp = -1;
-          }
-
-          did_change = hl_table[idx].sg_rgb_sp != old_color || hl_table[idx].sg_rgb_sp != old_idx;
-        }
-
+        did_change = set_gui_color(idx, init, arg, &hl_table[idx].sg_rgb_sp,
+                                   &hl_table[idx].sg_rgb_sp_idx);
         if (is_normal_group) {
           normal_sp = hl_table[idx].sg_rgb_sp;
         }
@@ -1475,7 +1478,8 @@ void do_highlight(const char *line, const bool forceit, const bool init)
         // Ignored for now
       } else if (strcmp(key, "BLEND") == 0) {
         if (strcmp(arg, "NONE") != 0) {
-          hl_table[idx].sg_blend = (int)strtol(arg, NULL, 10);
+          char *arg_end = arg;
+          hl_table[idx].sg_blend = getdigits_int(&arg_end, false, 0);
         } else {
           hl_table[idx].sg_blend = -1;
         }
@@ -1536,9 +1540,12 @@ void do_highlight(const char *line, const bool forceit, const bool init)
   }
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 void free_highlight(void)
 {
+  for (int i = 0; i < highlight_ga.ga_len; i++) {
+    xfree(hl_table[i].sg_font);
+  }
   ga_clear(&highlight_ga);
   map_destroy(cstr_t, &highlight_unames);
   arena_mem_free(arena_finish(&highlight_arena));
@@ -1590,6 +1597,9 @@ static void highlight_clear(int idx)
   hl_table[idx].sg_rgb_bg_idx = kColorIdxNone;
   hl_table[idx].sg_rgb_sp_idx = kColorIdxNone;
   hl_table[idx].sg_blend = -1;
+  if (hl_table[idx].sg_font != NULL) {
+    XFREE_CLEAR(hl_table[idx].sg_font);
+  }
   // Restore default link and context if they exist. Otherwise clears.
   hl_table[idx].sg_link = hl_table[idx].sg_deflink;
   // Since we set the default link, set the location to where the default
@@ -1635,8 +1645,9 @@ static void highlight_list_one(const int id)
   didh = highlight_list_arg(id, didh, LIST_STRING, 0,
                             coloridx_to_name(sgp->sg_rgb_sp_idx, sgp->sg_rgb_sp, hexbuf), "guisp");
 
-  didh = highlight_list_arg(id, didh, LIST_INT,
-                            sgp->sg_blend + 1, NULL, "blend");
+  didh = highlight_list_arg(id, didh, LIST_INT, sgp->sg_blend + 1, NULL, "blend");
+
+  didh = highlight_list_arg(id, didh, LIST_STRING, 0, sgp->sg_font, "font");
 
   if (sgp->sg_link && !got_int) {
     syn_list_header(didh, 0, id, true);
@@ -1657,7 +1668,8 @@ static void highlight_list_one(const int id)
 static bool hlgroup2dict(Dict *hl, NS ns_id, int hl_id, Arena *arena)
 {
   HlGroup *sgp = &hl_table[hl_id - 1];
-  int link = ns_id == 0 ? sgp->sg_link : ns_get_hl(&ns_id, hl_id, true, sgp->sg_set);
+  NS ns = ns_id;
+  int link = ns_id == 0 ? sgp->sg_link : ns_get_hl(&ns, hl_id, true, sgp->sg_set);
   if (link == -1) {
     return false;
   }
@@ -1665,8 +1677,9 @@ static bool hlgroup2dict(Dict *hl, NS ns_id, int hl_id, Arena *arena)
     // table entry was created but not ever set
     return false;
   }
-  HlAttrs attr =
-    syn_attr2entry(ns_id == 0 ? sgp->sg_attr : ns_get_hl(&ns_id, hl_id, false, sgp->sg_set));
+  ns = ns_id;
+  HlAttrs attr = syn_attr2entry(ns_id == 0 ? sgp->sg_attr : ns_get_hl(&ns, hl_id, false,
+                                                                      sgp->sg_set));
   *hl = arena_dict(arena, HLATTRS_DICT_SIZE + 1);
   if (attr.rgb_ae_attr & HL_DEFAULT) {
     PUT_C(*hl, "default", BOOLEAN_OBJ(true));
@@ -1962,6 +1975,10 @@ static void set_hl_attr(int idx)
   at_en.rgb_bg_color = sgp->sg_rgb_bg_idx != kColorIdxNone ? sgp->sg_rgb_bg : -1;
   at_en.rgb_sp_color = sgp->sg_rgb_sp_idx != kColorIdxNone ? sgp->sg_rgb_sp : -1;
   at_en.hl_blend = sgp->sg_blend;
+  // Convert font name to index
+  if (sgp->sg_font != NULL) {
+    at_en.font = hl_add_font_idx(sgp->sg_font);
+  }
 
   sgp->sg_attr = hl_get_syn_attr(0, idx + 1, at_en);
 
@@ -3166,7 +3183,7 @@ RgbValue name_to_color(const char *name, int *idx)
       && isxdigit((uint8_t)name[6]) && name[7] == NUL) {
     // rgb hex string
     *idx = kColorIdxHex;
-    return (RgbValue)strtol(name + 1, NULL, 16);
+    return (RgbValue)strtol(name + 1, NULL, 16);  // NOLINT(runtime/deprecated)
   } else if (!STRICMP(name, "bg") || !STRICMP(name, "background")) {
     *idx = kColorIdxBg;
     return normal_bg;

@@ -1008,6 +1008,28 @@ func Test_virtualedit_visual_block()
   bwipe!
 endfunc
 
+func Test_virtualedit_visual_block_reselect()
+  set ve=all
+  new
+  call append(0, ['###', '###', '###', '#####'])
+  call cursor(1, 1)
+  exe "norm! \<C-V>lljj"
+  call assert_equal([0, 3, 3, 0], getpos('.'))
+  call assert_equal([0, 1, 1, 0], getpos('v'))
+  norm! y
+  call assert_equal(['###', '###', '###'], getreg('"', v:true, v:true))
+  call cursor(2, 6)
+  call assert_equal([0, 2, 4, 2], getpos('.'))
+  norm! 1v
+  call assert_equal([0, 4, 6, 2], getpos('.'))
+  call assert_equal([0, 2, 4, 2], getpos('v'))
+  norm! r!
+  call assert_equal(['###  !!!', '###  !!!', '#####!!!'], getline(2, 4))
+
+  bwipe!
+  set ve&
+endfunc
+
 " Test for changing case
 func Test_visual_change_case()
   new
@@ -1321,10 +1343,11 @@ func Test_visual_block_with_virtualedit()
     set virtualedit=block
     normal G
   END
-  call writefile(lines, 'XTest_block')
+  call writefile(lines, 'XTest_block', 'D')
 
   let buf = RunVimInTerminal('-S XTest_block', {'rows': 8, 'cols': 50})
   call term_sendkeys(buf, "\<C-V>gg$")
+  call WaitForAssert({-> assert_match('VISUAL.*\dx\d', term_getline(buf, 8))}, 1000)
   call VerifyScreenDump(buf, 'Test_visual_block_with_virtualedit', {})
 
   call term_sendkeys(buf, "\<Esc>gg\<C-V>G$")
@@ -1333,7 +1356,6 @@ func Test_visual_block_with_virtualedit()
   " clean up
   call term_sendkeys(buf, "\<Esc>")
   call StopVimInTerminal(buf)
-  call delete('XTest_block')
 endfunc
 
 func Test_visual_block_ctrl_w_f()
@@ -2908,4 +2930,78 @@ func Test_getregionpos_block_linebreak_matches_getpos()
   let &columns = save_columns
   bw!
 endfunc
+
+func Test_visual_ended_in_wiped_buffer()
+  edit Xfoo
+  edit Xbar
+  setlocal bufhidden=wipe
+  augroup testing
+    autocmd BufWipeout * ++once normal! v
+  augroup END
+  " Must be the last window.
+  call assert_equal(1, winnr('$'))
+  call assert_equal(1, tabpagenr('$'))
+  " Was a member access on a NULL curbuf from Vim ending Visual mode.
+  buffer #
+  call assert_equal(0, bufexists('Xbar'))
+  call assert_equal('n', mode())
+
+  autocmd! testing
+  %bw!
+endfunc
+
+func Test_visual_ended_in_unloaded_buffer()
+  throw 'Skipped: needs clipboard=autoselect'
+  CheckFeature clipboard
+  CheckNotGui
+  set clipboard+=autoselect
+  edit Xfoo
+  edit Xbar
+  call setline(1, 'hi')
+  setlocal nomodified
+  let s:fired = 0
+  augroup testing
+    autocmd BufUnload Xbar call assert_equal('Xbar', bufname())
+          \| execute 'normal! V'
+          \| call assert_equal('V', mode())
+
+    " From Vim ending Visual mode.  Used to occur too late, after the buffer was
+    " unloaded, so @* didn't contain the selection.  Window also had a NULL
+    " w_buffer here!
+    autocmd TextYankPost * ++once let s:fired = 1
+          \| if has('clipboard_working') | call assert_equal("hi\n", @*) | endif
+          \| call tabpagebuflist() " was a NULL member access on w_buffer
+  augroup END
+
+  buffer Xfoo
+  call assert_equal(0, bufloaded('Xbar'))
+  call assert_equal('n', mode())
+  call assert_equal(1, s:fired)
+
+  augroup testing
+    autocmd!
+    autocmd BufHidden Xfoo ++once call assert_equal('Xfoo', bufname())
+          \| execute 'normal! v'
+          \| call assert_equal('v', mode())
+
+    " Check b_nwindows is not decremented too early when Visual mode ends in a
+    " loaded buffer.  Buffer should not be considered hidden in TextYankPost, as
+    " by that point it's still loaded and displayed in the current window.
+    autocmd TextYankPost * ++once let s:fired = 2
+          \| call assert_equal(1, bufloaded(bufnr()))
+          \| call assert_equal(0, getbufinfo(bufnr())[0].hidden)
+  augroup END
+  edit Xbar
+  edit Xfoo
+  only
+  hide buffer #
+  call assert_equal('n', mode())
+  call assert_equal(2, s:fired)
+
+  autocmd! testing
+  unlet! s:fired
+  set clipboard&
+  %bw!
+endfunc
+
 " vim: shiftwidth=2 sts=2 expandtab
